@@ -401,3 +401,21 @@ a.pomi-tx-badge:hover {
   justify-content: center;
   margin-top: 4px;
 }
+
+/* Mining active button */
+.btn-mining-active {
+  background: transparent;
+  color: var(--amber);
+  border: 2px solid var(--amber);
+  box-shadow: 0 0 12px var(--amber), inset 0 0 8px var(--amber-glow);
+  animation: mining-pulse 1.5s ease infinite;
+}
+.btn-mining-active:hover {
+  background: var(--amber);
+  color: var(--bg);
+}
+
+@keyframes mining-pulse {
+  0%, 100% { box-shadow: 0 0 8px var(--amber), inset 0 0 4px var(--amber-glow); }
+  50% { box-shadow: 0 0 20px var(--amber), inset 0 0 10px var(--amber-glow); }
+}

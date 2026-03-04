@@ -95,19 +95,11 @@ function getWinnerRecordPda(user) {
 
 // ── Public API ──────────────────────────────────────────────────
 
-/**
- * Fetch current quest info from chain
- */
-export async function getQuestInfo(connection) {
-  const kp = Keypair.generate()
-  const program = createProgram(connection, kp)
-  const poolPda = getPoolPda()
-  const pool = await program.account.pool.fetch(poolPda)
-
+function parsePoolAccount(program, data) {
+  const pool = program.coder.accounts.decode('pool', data)
   const now = Math.floor(Date.now() / 1000)
   const deadline = pool.deadline.toNumber()
   const secsLeft = deadline - now
-
   return {
     active: pool.isActive,
     round: pool.round.toString(),
@@ -126,23 +118,49 @@ export async function getQuestInfo(connection) {
   }
 }
 
-/**
- * Check if this wallet already answered the current round
- * Returns { answered, rewarded }
- */
-export async function checkAnswered(connection, userPubkey, currentRound) {
-  const kp = Keypair.generate()
-  const program = createProgram(connection, kp)
-  const winnerPda = getWinnerRecordPda(userPubkey)
+function parseWinnerRecord(program, data, currentRound) {
   try {
-    const wr = await program.account.winnerRecord.fetch(winnerPda)
+    const wr = program.coder.accounts.decode('winnerRecord', data)
     if (wr.round.toString() === currentRound) {
       return { answered: true, rewarded: wr.rewarded }
     }
-    return { answered: false, rewarded: false }
-  } catch {
-    return { answered: false, rewarded: false }
+  } catch { /* account doesn't exist or decode fails */ }
+  return { answered: false, rewarded: false }
+}
+
+/**
+ * Fetch quest info + answer status in a single RPC call (getMultipleAccounts)
+ * If userPubkey is provided, also checks winner record for current round
+ */
+export async function fetchQuestAndStatus(connection, userPubkey) {
+  const kp = Keypair.generate()
+  const program = createProgram(connection, kp)
+  const poolPda = getPoolPda()
+
+  const pdas = [poolPda]
+  if (userPubkey) pdas.push(getWinnerRecordPda(userPubkey))
+
+  const accounts = await connection.getMultipleAccountsInfo(pdas)
+
+  // Pool account must exist
+  if (!accounts[0]) throw new Error('Quest pool account not found')
+  // Skip 8-byte discriminator is handled by Anchor coder
+  const quest = parsePoolAccount(program, accounts[0].data)
+
+  let roundStatus = { answered: false, rewarded: false }
+  if (userPubkey && accounts[1]?.data) {
+    roundStatus = parseWinnerRecord(program, accounts[1].data, quest.round)
   }
+
+  return { quest, roundStatus }
+}
+
+/**
+ * Fetch current quest info from chain (single account)
+ */
+export async function getQuestInfo(connection) {
+  const { quest } = await fetchQuestAndStatus(connection, null)
+  return quest
 }
 
 /**

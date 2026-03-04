@@ -5,8 +5,7 @@ import bs58 from 'bs58'
 import { useApp, DEFAULT_RPC } from '../store.jsx'
 import { useI18n } from '../i18n.jsx'
 import {
-  getQuestInfo,
-  checkAnswered,
+  fetchQuestAndStatus,
   getBalance,
   generateProof,
   submitAnswerViaRelay,
@@ -16,6 +15,17 @@ import {
 import './PoMI.css'
 
 function pad(n) { return String(n).padStart(2, '0') }
+
+const REWARD_KEY = 'nara_round_reward_v1'
+function saveRoundReward(round, rewardNso) {
+  try { localStorage.setItem(REWARD_KEY, JSON.stringify({ round, rewardNso })) } catch {}
+}
+function loadRoundReward(round) {
+  try {
+    const d = JSON.parse(localStorage.getItem(REWARD_KEY) || '{}')
+    return d.round === round ? d.rewardNso : null
+  } catch { return null }
+}
 
 function DifficultyBar({ level, t }) {
   const label = level <= 3 ? t('pomi.easy') : level <= 6 ? t('pomi.medium') : level <= 8 ? t('pomi.hard') : t('pomi.expert')
@@ -35,7 +45,6 @@ function DifficultyBar({ level, t }) {
   )
 }
 
-// ── Phase: idle → answering → proving → submitting → result
 export default function PoMI() {
   const navigate = useNavigate()
   const { wallet, model, modelOk, setModelOk } = useApp()
@@ -48,35 +57,42 @@ export default function PoMI() {
   const [timeLeft, setTimeLeft] = useState(0)
 
   // Round answered status
-  const [roundStatus, setRoundStatus] = useState(null) // null | { answered, rewarded }
+  const [roundStatus, setRoundStatus] = useState(null)
 
   // Mining flow state
-  const [phase, setPhase] = useState('idle') // idle | answering | proving | submitting | result
+  const [phase, setPhase] = useState('idle') // idle | answering | proving | submitting | result | waiting
   const [status, setStatus] = useState('')
-  const [result, setResult] = useState(null) // { rewarded, rewardNso, winner, txHash, method }
+  const [result, setResult] = useState(null)
   const [showModal, setShowModal] = useState(null)
 
-  const timerRef = useRef(null)
+  // Auto-mining
+  const [mining, setMining] = useState(false)
+  const miningRef = useRef(false)
   const abortRef = useRef(null)
+  const timerRef = useRef(null)
+  const pollRef = useRef(null)
 
   const rpcUrl = model.rpcUrl || DEFAULT_RPC
 
-  // ── Fetch quest from chain ──────────────────────────────────
+  // Keep miningRef in sync
+  useEffect(() => { miningRef.current = mining }, [mining])
+
+  // ── Fetch quest + answer status in one RPC call ────────────
   const fetchQuest = useCallback(async () => {
     setLoading(true)
     setError(null)
-    setRoundStatus(null)
     try {
       const conn = new Connection(rpcUrl, 'confirmed')
-      const info = await getQuestInfo(conn)
+      const userPubkey = wallet ? new PublicKey(wallet.publicKey) : null
+      const { quest: info, roundStatus: rs } = await fetchQuestAndStatus(conn, userPubkey)
       setQuest(info)
       setTimeLeft(Math.max(0, info.timeRemaining))
-      // Check if current wallet already answered this round
-      if (wallet) {
-        const pubkey = new PublicKey(wallet.publicKey)
-        const status = await checkAnswered(conn, pubkey, info.round)
-        setRoundStatus(status)
+      // Restore saved reward amount if same round
+      if (rs.answered && rs.rewarded) {
+        const saved = loadRoundReward(info.round)
+        if (saved != null) rs.rewardNso = saved
       }
+      setRoundStatus(rs)
     } catch (e) {
       console.error('fetchQuest:', e)
       setError(e.message)
@@ -87,6 +103,29 @@ export default function PoMI() {
 
   useEffect(() => { fetchQuest() }, [fetchQuest])
 
+  // ── Poll for next round (silent, no loading state) ────────
+  const pollNextRound = useCallback(async (currentRound) => {
+    const conn = new Connection(rpcUrl, 'confirmed')
+    const userPubkey = wallet ? new PublicKey(wallet.publicKey) : null
+
+    while (miningRef.current) {
+      await new Promise(r => setTimeout(r, 3000))
+      if (!miningRef.current) break
+      try {
+        const { quest: info, roundStatus: rs } = await fetchQuestAndStatus(conn, userPubkey)
+        if (info.round !== currentRound) {
+          // New round arrived
+          setQuest(info)
+          setTimeLeft(Math.max(0, info.timeRemaining))
+          setRoundStatus(rs)
+          setResult(null)
+          return info
+        }
+      } catch { /* retry silently */ }
+    }
+    return null
+  }, [rpcUrl, wallet])
+
   // ── Countdown timer ─────────────────────────────────────────
   useEffect(() => {
     if (!quest || quest.expired) return
@@ -95,8 +134,10 @@ export default function PoMI() {
       setTimeLeft(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current)
-          // Auto-refresh when round expires
-          setTimeout(fetchQuest, 2000)
+          // If not auto-mining, silently refresh after 2s
+          if (!miningRef.current) {
+            setTimeout(fetchQuest, 2000)
+          }
           return 0
         }
         return prev - 1
@@ -105,15 +146,35 @@ export default function PoMI() {
     return () => clearInterval(timerRef.current)
   }, [quest, fetchQuest])
 
-  // ── Start mining ────────────────────────────────────────────
-  const handleStart = useCallback(async () => {
-    if (!wallet) { setShowModal('no-wallet'); return }
-    if (!model.baseUrl || !model.apiKey || !model.model) {
-      setShowModal('no-model'); return
-    }
-    if (!quest || !quest.active || quest.expired) return
-    if (roundStatus?.answered) return
+  // ── Wait for round to expire ──────────────────────────────
+  const waitForExpiry = useCallback(() => {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!miningRef.current) { resolve(false); return }
+        // Check deadline directly from quest ref won't work due to closure,
+        // so we use a polling approach based on the deadline timestamp
+        const now = Math.floor(Date.now() / 1000)
+        if (now >= questRef.current.deadline) {
+          resolve(true)
+        } else {
+          setTimeout(check, 1000)
+        }
+      }
+      check()
+    })
+  }, [])
 
+  // Need a ref for quest to avoid stale closures in waitForExpiry
+  const questRef = useRef(null)
+  useEffect(() => { questRef.current = quest }, [quest])
+
+  // ── Single mining run for one round ───────────────────────
+  const runOneRound = useCallback(async () => {
+    if (!miningRef.current) return
+    if (!wallet || !model.baseUrl || !model.apiKey || !model.model) return
+    if (!questRef.current || !questRef.current.active) return
+
+    const currentQuest = questRef.current
     const conn = new Connection(rpcUrl, 'confirmed')
     const walletKp = Keypair.fromSecretKey(bs58.decode(wallet.secretKey))
     const abort = new AbortController()
@@ -125,7 +186,7 @@ export default function PoMI() {
 
     try {
       // 1. AI generates answer
-      const prompt = `You are answering a blockchain quiz. The question is:\n"${quest.question}"\n\nProvide ONLY the answer text, nothing else. Be concise and precise. One word or short phrase only.`
+      const prompt = `You are answering a blockchain quiz. The question is:\n"${currentQuest.question}"\n\nProvide ONLY the answer text, nothing else. Be concise and precise. One word or short phrase only.`
       const res = await fetch(`${model.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${model.apiKey}` },
@@ -142,12 +203,12 @@ export default function PoMI() {
       setStatus(t('pomi.generatingProof'))
       let proof
       try {
-        proof = await generateProof(aiAnswer, quest.answerHash, walletKp.publicKey)
+        proof = await generateProof(aiAnswer, currentQuest.answerHash, walletKp.publicKey)
       } catch (e) {
         console.error('Proof failed:', e)
         setPhase('result')
         setResult({ rewarded: false, error: t('pomi.proofFailed') })
-        return
+        return // Don't retry, wait for next round
       }
 
       // 3. Check balance → decide direct TX vs relay
@@ -158,12 +219,10 @@ export default function PoMI() {
       let txHash
 
       if (balance > 10_000_000) {
-        // Has balance → direct transaction
         setStatus(t('pomi.submitting'))
         const { signature } = await submitAnswerDirect(conn, walletKp, proof.solana, agentId, modelId)
         txHash = signature
       } else {
-        // No balance → relay
         setStatus(t('pomi.submittingRelay'))
         const { txHash: hash } = await submitAnswerViaRelay(walletKp.publicKey, proof.hex, agentId, modelId)
         txHash = hash
@@ -179,6 +238,9 @@ export default function PoMI() {
       }
 
       setPhase('result')
+      const rNso = reward.rewarded ? reward.rewardNso : 0
+      setRoundStatus({ answered: true, rewarded: reward.rewarded, rewardNso: rNso })
+      if (reward.rewarded && questRef.current) saveRoundReward(questRef.current.round, rNso)
       setResult({
         rewarded: reward.rewarded,
         rewardNso: reward.rewardNso,
@@ -191,23 +253,90 @@ export default function PoMI() {
       if (e.name === 'AbortError') return
       console.error('Mining error:', e)
       setPhase('result')
-      // Try to extract txHash from error message (confirmation timeout includes signature)
       const sigMatch = e.message?.match(/Check signature ([A-Za-z0-9]{32,})/)
-      const errTx = sigMatch?.[1] || txHash || null
-      const msg = e.message?.includes('AlreadyAnswered') || e.message?.includes('6008')
+      const errTx = sigMatch?.[1] || null
+      const isAlreadyAnswered = e.message?.includes('AlreadyAnswered') || e.message?.includes('6008')
+      const msg = isAlreadyAnswered
         ? t('pomi.alreadyAnswered')
         : e.message?.includes('not confirmed') ? t('pomi.submitFailed')
         : e.message || t('pomi.submitFailed')
+      if (isAlreadyAnswered) setRoundStatus({ answered: true, rewarded: false })
       setResult({ rewarded: false, error: msg, txHash: errTx })
+      // Don't retry, wait for next round
     }
-  }, [wallet, model, quest, rpcUrl, roundStatus, t, setModelOk])
+  }, [wallet, model, rpcUrl, t, setModelOk])
 
-  const handleNextRound = useCallback(() => {
-    setPhase('idle')
-    setResult(null)
-    setStatus('')
-    fetchQuest()
-  }, [fetchQuest])
+  // ── Auto-mining loop ──────────────────────────────────────
+  const startMiningLoop = useCallback(async () => {
+    while (miningRef.current) {
+      const q = questRef.current
+      if (!q) { await new Promise(r => setTimeout(r, 2000)); continue }
+
+      // If already answered this round or quest expired → skip to waiting
+      if (q.expired || !q.active) {
+        // wait then poll
+      } else {
+        // Check roundStatus from latest state
+        const conn = new Connection(rpcUrl, 'confirmed')
+        const userPubkey = wallet ? new PublicKey(wallet.publicKey) : null
+        try {
+          const { roundStatus: rs } = await fetchQuestAndStatus(conn, userPubkey)
+          setRoundStatus(rs)
+          if (!rs.answered) {
+            await runOneRound()
+          }
+        } catch { /* skip */ }
+      }
+
+      if (!miningRef.current) break
+
+      // Wait for round to expire
+      setPhase('waiting')
+      setStatus(t('pomi.waitingNextRound'))
+      const expired = await waitForExpiry()
+      if (!expired || !miningRef.current) break
+
+      // Poll for next round (keep current data displayed)
+      setStatus(t('pomi.fetchingNextRound'))
+      const newQuest = await pollNextRound(questRef.current?.round)
+      if (!newQuest || !miningRef.current) break
+    }
+
+    // Cleanup when loop exits
+    if (!miningRef.current) {
+      // Only reset phase if we're still in waiting/working state
+      setPhase(prev => prev === 'waiting' ? 'idle' : prev)
+    }
+  }, [rpcUrl, wallet, runOneRound, pollNextRound, waitForExpiry, t])
+
+  // ── Toggle mining ─────────────────────────────────────────
+  const handleToggleMining = useCallback(() => {
+    if (!mining) {
+      // Start
+      if (!wallet) { setShowModal('no-wallet'); return }
+      if (!model.baseUrl || !model.apiKey || !model.model) { setShowModal('no-model'); return }
+      setMining(true)
+      miningRef.current = true
+      startMiningLoop()
+    } else {
+      // Stop
+      setMining(false)
+      miningRef.current = false
+      if (abortRef.current) abortRef.current.abort()
+      if (pollRef.current) clearTimeout(pollRef.current)
+      setPhase('idle')
+      setStatus('')
+    }
+  }, [mining, wallet, model, startMiningLoop])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      miningRef.current = false
+      if (abortRef.current) abortRef.current.abort()
+      clearInterval(timerRef.current)
+    }
+  }, [])
 
   // Timer display
   const mins = Math.floor(timeLeft / 60)
@@ -215,6 +344,8 @@ export default function PoMI() {
   const maxTime = quest ? Math.max(quest.timeRemaining, 1) : 1
   const pct = quest ? (timeLeft / maxTime) * 100 : 0
   const urgent = timeLeft <= 30 && timeLeft > 0
+
+  const isWorking = phase === 'answering' || phase === 'proving' || phase === 'submitting'
 
   return (
     <main className="page pomi-page">
@@ -229,29 +360,26 @@ export default function PoMI() {
         <span className={`badge ${modelOk ? 'badge-ok' : model.baseUrl ? 'badge-warn' : 'badge-off'}`}>
           {modelOk ? t('pomi.modelOnline') : model.baseUrl ? t('pomi.modelUnverified') : t('pomi.noModel')}
         </span>
-        {roundStatus && phase === 'idle' && (
+        {roundStatus && (
           roundStatus.answered
             ? <span className={`badge ${roundStatus.rewarded ? 'badge-ok' : 'badge-warn'}`}>
-                {t('pomi.roundAnswered')}{roundStatus.rewarded ? ` · ${t('pomi.roundRewarded')}` : ` · ${t('pomi.roundNotRewarded')}`}
+                {t('pomi.roundAnswered')}{roundStatus.rewarded
+                  ? ` · ${roundStatus.rewardNso ? `+${roundStatus.rewardNso.toFixed(2)} NARA` : t('pomi.roundRewarded')}`
+                  : ` · ${t('pomi.roundNotRewarded')}`}
               </span>
             : <span className="badge badge-off">{t('pomi.roundNotAnswered')}</span>
-        )}
-        {phase === 'result' && result && result.rewarded && (
-          <span className="badge badge-ok">
-            +{result.rewardNso.toFixed(2)} NARA
-          </span>
         )}
       </div>
 
       {/* Loading / Error */}
-      {loading && (
+      {loading && !quest && (
         <div className="pomi-loading-full">
           <div className="spinner" />
           <span>{t('pomi.fetchingQuest')}</span>
         </div>
       )}
 
-      {error && !loading && (
+      {error && !loading && !quest && (
         <div className="pomi-error-card">
           <p>{error}</p>
           <button className="btn btn-ghost" onClick={fetchQuest}>{t('pomi.refreshQuest')}</button>
@@ -259,7 +387,7 @@ export default function PoMI() {
       )}
 
       {/* Quest content */}
-      {quest && !loading && !error && (
+      {quest && (
         <>
           {/* Timer ring */}
           <div className={`pomi-timer-wrap ${urgent ? 'urgent' : ''}`}>
@@ -301,7 +429,7 @@ export default function PoMI() {
             <p className="pomi-q-text">{quest.question}</p>
 
             {/* Mining progress */}
-            {phase !== 'idle' && phase !== 'result' && (
+            {(isWorking || phase === 'waiting') && (
               <div className="pomi-mining-status">
                 <div className="spinner" />
                 <span>{status}</span>
@@ -343,24 +471,13 @@ export default function PoMI() {
 
           {/* CTA */}
           <div className="pomi-cta">
-            {phase === 'idle' && !quest.expired && quest.active && !roundStatus?.answered && (
-              <button className="btn btn-primary btn-lg" onClick={handleStart}>
+            {mining ? (
+              <button className="btn btn-lg btn-mining-active" onClick={handleToggleMining}>
+                {t('pomi.stopMining')}
+              </button>
+            ) : (
+              <button className="btn btn-primary btn-lg" onClick={handleToggleMining}>
                 {t('pomi.startMining')}
-              </button>
-            )}
-            {phase === 'idle' && !quest.expired && quest.active && roundStatus?.answered && (
-              <button className="btn btn-ghost btn-lg" disabled>
-                {t('pomi.alreadyAnswered')}
-              </button>
-            )}
-            {phase === 'idle' && (quest.expired || !quest.active) && (
-              <button className="btn btn-ghost btn-lg" onClick={fetchQuest}>
-                {t('pomi.refreshQuest')}
-              </button>
-            )}
-            {phase === 'result' && (
-              <button className="btn btn-ghost btn-lg" onClick={handleNextRound}>
-                {t('pomi.nextRound')}
               </button>
             )}
           </div>
