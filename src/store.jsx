@@ -1,8 +1,9 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 
 // ── Wallet helpers ──────────────────────────────────────────────
-const WALLET_KEY = 'nara_wallet_v1'
-const MODEL_KEY  = 'nara_model_v1'
+const WALLET_KEY   = 'nara_wallet_v1'
+const MODEL_KEY    = 'nara_model_v1'
+const MODEL_OK_KEY = 'nara_model_ok_v1'
 
 export const DEFAULT_RPC = 'https://mainnet-api.nara.build/'
 
@@ -47,7 +48,12 @@ const AppContext = createContext(null)
 export function AppProvider({ children }) {
   const [wallet, setWallet] = useState(() => loadWallet())
   const [model, setModel]   = useState(() => loadModel())
-  const [modelOk, setModelOk] = useState(false)
+  const [modelOk, setModelOkState] = useState(() => localStorage.getItem(MODEL_OK_KEY) === '1')
+
+  const setModelOk = useCallback((v) => {
+    setModelOkState(v)
+    localStorage.setItem(MODEL_OK_KEY, v ? '1' : '0')
+  }, [])
 
   // Persist wallet whenever it changes
   useEffect(() => {

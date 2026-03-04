@@ -229,10 +229,12 @@ export default function PoMI() {
         <span className={`badge ${modelOk ? 'badge-ok' : model.baseUrl ? 'badge-warn' : 'badge-off'}`}>
           {modelOk ? t('pomi.modelOnline') : model.baseUrl ? t('pomi.modelUnverified') : t('pomi.noModel')}
         </span>
-        {roundStatus?.answered && phase === 'idle' && (
-          <span className={`badge ${roundStatus.rewarded ? 'badge-ok' : 'badge-warn'}`}>
-            {t('pomi.roundAnswered')}{roundStatus.rewarded ? ` · ${t('pomi.roundRewarded')}` : ` · ${t('pomi.roundNotRewarded')}`}
-          </span>
+        {roundStatus && phase === 'idle' && (
+          roundStatus.answered
+            ? <span className={`badge ${roundStatus.rewarded ? 'badge-ok' : 'badge-warn'}`}>
+                {t('pomi.roundAnswered')}{roundStatus.rewarded ? ` · ${t('pomi.roundRewarded')}` : ` · ${t('pomi.roundNotRewarded')}`}
+              </span>
+            : <span className="badge badge-off">{t('pomi.roundNotAnswered')}</span>
         )}
         {phase === 'result' && result && result.rewarded && (
           <span className="badge badge-ok">
