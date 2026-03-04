@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Keypair, Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL, sendAndConfirmTransaction } from '@solana/web3.js'
+import { Keypair, Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import * as bip39 from 'bip39'
 import { derivePath } from 'ed25519-hd-key'
 import bs58 from 'bs58'
@@ -38,6 +38,8 @@ export default function Wallet() {
   const [amount, setAmount]         = useState('')
   const [sending, setSending]       = useState(false)
   const [showTransfer, setShowTransfer] = useState(false)
+  const [txResult, setTxResult]     = useState(null) // { ok, sig, error }
+  const [confirmSend, setConfirmSend] = useState(false)
   const [newMnemonic, setNewMnemonic]   = useState('')
 
   const notify = useCallback((msg, type = 'ok') => setToast({ msg, type }), [])
@@ -86,20 +88,41 @@ export default function Wallet() {
     } catch { notify(t('wallet.invalidKey'), 'err') }
   }, [inputVal, importMode, setWallet, notify, t])
 
-  const handleSend = useCallback(async () => {
+  const handleSendClick = useCallback(() => {
     if (!toAddr || !amount) { notify(t('wallet.fillFields'), 'err'); return }
     const lamports = Math.round(parseFloat(amount) * LAMPORTS_PER_SOL)
     if (isNaN(lamports) || lamports <= 0) { notify(t('wallet.invalidAmount'), 'err'); return }
-    setSending(true)
+    setConfirmSend(true)
+  }, [toAddr, amount, notify, t])
+
+  const handleSend = useCallback(async () => {
+    setConfirmSend(false)
+    if (!toAddr || !amount) return
+    const lamports = Math.round(parseFloat(amount) * LAMPORTS_PER_SOL)
+    if (isNaN(lamports) || lamports <= 0) return
+    setSending(true); setTxResult(null)
     try {
       const conn = new Connection(rpcUrl, 'confirmed')
       const kp = storeToKeypair(wallet)
       const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: kp.publicKey, toPubkey: new PublicKey(toAddr), lamports }))
-      const sig = await sendAndConfirmTransaction(conn, tx, [kp])
-      notify(`Sent! Sig: ${truncate(sig, 8, 8)}`)
-      setToAddr(''); setAmount(''); setShowTransfer(false); fetchBalance()
-    } catch (e) { notify(e.message || t('wallet.transferFailed'), 'err') }
-    finally { setSending(false) }
+      tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
+      tx.feePayer = kp.publicKey
+      tx.sign(kp)
+      const sig = await conn.sendRawTransaction(tx.serialize())
+      // Poll for confirmation instead of using WebSocket-based confirmTransaction
+      for (let i = 0; i < 60; i++) {
+        const { value } = await conn.getSignatureStatuses([sig])
+        const status = value?.[0]
+        if (status?.err) throw new Error('Transaction failed')
+        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') break
+        if (i === 59) throw new Error('Transaction confirmation timeout')
+        await new Promise(r => setTimeout(r, 2000))
+      }
+      setTxResult({ ok: true, sig })
+      setToAddr(''); setAmount(''); fetchBalance()
+    } catch (e) {
+      setTxResult({ ok: false, error: e.message || t('wallet.transferFailed') })
+    } finally { setSending(false) }
   }, [toAddr, amount, wallet, rpcUrl, fetchBalance, notify, t])
 
   // No wallet — show create/import
@@ -178,7 +201,7 @@ export default function Wallet() {
   return (
     <main className="page">
       <h1 className="page-title">{t('wallet.title')}</h1>
-      <p className="page-sub">Solana · {truncate(wallet.publicKey)}</p>
+      <p className="page-sub">Nara · {truncate(wallet.publicKey)}</p>
 
       <div className="wallet-hero">
         <div className="wallet-hero-inner">
@@ -186,7 +209,12 @@ export default function Wallet() {
           <div className="wallet-balance-val">
             {loadingBal ? <div className="spinner" /> : balance !== null ? balance.toFixed(6) : '—'}
           </div>
-          <button className="btn btn-ghost" style={{ marginTop: 8, fontSize: 11 }} onClick={fetchBalance}>{t('wallet.refresh')}</button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={fetchBalance}>{t('wallet.refresh')}</button>
+            <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => setShowTransfer(v => !v)}>
+              {showTransfer ? t('common.cancel') : t('wallet.transfer')}
+            </button>
+          </div>
         </div>
         <div className="wallet-addr-row">
           <span className="wallet-addr-label">{t('wallet.address')}</span>
@@ -198,27 +226,52 @@ export default function Wallet() {
         </div>
       </div>
 
-      <div className="wallet-actions">
-        <button className="btn btn-primary" onClick={() => setShowTransfer(v => !v)}>
-          {showTransfer ? t('common.cancel') : t('wallet.transfer')}
-        </button>
-      </div>
-
       {showTransfer && (
         <div className="card" style={{ marginBottom: 16 }}>
-          <div className="card-title">{t('wallet.sendSol')}</div>
+          <div className="card-title">{t('wallet.sendNara')}</div>
           <div className="input-group" style={{ marginBottom: 10 }}>
             <label className="input-label">{t('wallet.recipient')}</label>
-            <input className="input" placeholder="Solana public key" value={toAddr} onChange={e => setToAddr(e.target.value)} />
+            <input className="input" placeholder="Nara address" value={toAddr} onChange={e => { setToAddr(e.target.value); setTxResult(null) }} />
           </div>
-          <div className="input-row">
-            <div className="input-group">
-              <label className="input-label">{t('wallet.amount')}</label>
-              <input className="input" type="number" min="0" step="0.001" placeholder="0.001" value={amount} onChange={e => setAmount(e.target.value)} />
-            </div>
-            <button className="btn btn-primary" onClick={handleSend} disabled={sending} style={{ flexShrink: 0 }}>
+          <div className="input-group" style={{ marginBottom: 10 }}>
+            <label className="input-label">{t('wallet.amount')}</label>
+            <input className="input" type="number" min="0" step="0.001" placeholder="0.001" value={amount} onChange={e => { setAmount(e.target.value); setTxResult(null) }} />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={handleSendClick} disabled={sending}>
               {sending ? <><div className="spinner" />{t('wallet.sending')}</> : t('wallet.send')}
             </button>
+          </div>
+          {txResult && (
+            <div className={`wallet-tx-result ${txResult.ok ? 'wallet-tx-ok' : 'wallet-tx-err'}`}>
+              <span className="wallet-tx-icon">{txResult.ok ? '✓' : '✗'}</span>
+              <div className="wallet-tx-body">
+                <div>{txResult.ok ? t('wallet.sent') : txResult.error}</div>
+                {txResult.sig && (
+                  <a className="wallet-tx-link" href={`https://explorer.nara.build/tx/${txResult.sig}`}
+                    target="_blank" rel="noopener noreferrer">
+                    TX {truncate(txResult.sig, 8, 8)} ↗
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Confirm send modal */}
+      {confirmSend && (
+        <div className="modal-backdrop" onClick={() => setConfirmSend(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">{t('wallet.confirmTitle')}</div>
+            <p className="modal-body">
+              {t('wallet.confirmBody')}<br />
+              <strong>{amount} NARA</strong> →<br /><code style={{ fontSize: 11, wordBreak: 'break-all' }}>{toAddr}</code>
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setConfirmSend(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" onClick={handleSend}>{t('wallet.confirmSend')}</button>
+            </div>
           </div>
         </div>
       )}
