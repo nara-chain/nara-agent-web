@@ -402,20 +402,31 @@ a.pomi-tx-badge:hover {
   margin-top: 4px;
 }
 
-/* Mining active button */
+/* Mining active button — red stop with breathing dot */
 .btn-mining-active {
+  border-color: var(--red);
+  color: var(--red);
   background: transparent;
-  color: var(--amber);
-  border: 2px solid var(--amber);
-  box-shadow: 0 0 12px var(--amber), inset 0 0 8px var(--amber-glow);
-  animation: mining-pulse 1.5s ease infinite;
+  font-weight: 700;
+  gap: 10px;
+}
+.btn-mining-active::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  box-shadow: 0 0 6px var(--red);
+  animation: mining-dot 1.5s ease-in-out infinite;
+  flex-shrink: 0;
 }
 .btn-mining-active:hover {
-  background: var(--amber);
-  color: var(--bg);
+  background: var(--red-glow);
+  border-color: var(--red);
+  color: var(--red);
 }
 
-@keyframes mining-pulse {
-  0%, 100% { box-shadow: 0 0 8px var(--amber), inset 0 0 4px var(--amber-glow); }
-  50% { box-shadow: 0 0 20px var(--amber), inset 0 0 10px var(--amber-glow); }
+@keyframes mining-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px var(--red); }
+  50% { opacity: 0.3; box-shadow: 0 0 2px var(--red); }
 }

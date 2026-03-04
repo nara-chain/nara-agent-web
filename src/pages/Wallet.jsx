@@ -24,7 +24,7 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Wallet() {
-  const { wallet, setWallet, clearWallet, model } = useApp()
+  const { wallet, setWallet, model } = useApp()
   const { t } = useI18n()
   const rpcUrl = model.rpcUrl || DEFAULT_RPC
 
@@ -37,10 +37,8 @@ export default function Wallet() {
   const [toAddr, setToAddr]         = useState('')
   const [amount, setAmount]         = useState('')
   const [sending, setSending]       = useState(false)
-  const [showTransfer, setShowTransfer]     = useState(false)
-  const [showSecret, setShowSecret]         = useState(false)
-  const [showConfirmClear, setShowConfirmClear] = useState(false)
-  const [newMnemonic, setNewMnemonic]       = useState('')
+  const [showTransfer, setShowTransfer] = useState(false)
+  const [newMnemonic, setNewMnemonic]   = useState('')
 
   const notify = useCallback((msg, type = 'ok') => setToast({ msg, type }), [])
 
@@ -104,6 +102,7 @@ export default function Wallet() {
     finally { setSending(false) }
   }, [toAddr, amount, wallet, rpcUrl, fetchBalance, notify, t])
 
+  // No wallet — show create/import
   if (tab === 'main' && !wallet) {
     return (
       <main className="page">
@@ -175,6 +174,7 @@ export default function Wallet() {
     )
   }
 
+  // Has wallet — show wallet info (no delete, no import another, no show key)
   return (
     <main className="page">
       <h1 className="page-title">{t('wallet.title')}</h1>
@@ -202,11 +202,6 @@ export default function Wallet() {
         <button className="btn btn-primary" onClick={() => setShowTransfer(v => !v)}>
           {showTransfer ? t('common.cancel') : t('wallet.transfer')}
         </button>
-        <button className="btn btn-ghost" onClick={() => setShowSecret(s => !s)}>
-          {showSecret ? t('wallet.hideKey') : t('wallet.showKey')}
-        </button>
-        <button className="btn btn-ghost" onClick={() => setTab('import')}>{t('wallet.importAnother')}</button>
-        <button className="btn btn-danger" onClick={() => setShowConfirmClear(true)}>{t('wallet.remove')}</button>
       </div>
 
       {showTransfer && (
@@ -224,27 +219,6 @@ export default function Wallet() {
             <button className="btn btn-primary" onClick={handleSend} disabled={sending} style={{ flexShrink: 0 }}>
               {sending ? <><div className="spinner" />{t('wallet.sending')}</> : t('wallet.send')}
             </button>
-          </div>
-        </div>
-      )}
-
-      {showSecret && (
-        <div className="card wallet-secret-card" style={{ marginBottom: 16 }}>
-          <div className="card-title">{t('wallet.privKeyTitle')}</div>
-          <p className="wallet-warn" style={{ marginBottom: 10 }}>{t('wallet.privKeyWarn')}</p>
-          <code className="wallet-secret-key">{wallet.secretKey}</code>
-        </div>
-      )}
-
-      {showConfirmClear && (
-        <div className="modal-backdrop" onClick={() => setShowConfirmClear(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">{t('wallet.removeTitle')}</div>
-            <p className="modal-body">{t('wallet.removeBody')}</p>
-            <div className="modal-actions">
-              <button className="btn btn-ghost" onClick={() => setShowConfirmClear(false)}>{t('common.cancel')}</button>
-              <button className="btn btn-danger" onClick={() => { clearWallet(); setShowConfirmClear(false) }}>{t('wallet.remove')}</button>
-            </div>
           </div>
         </div>
       )}

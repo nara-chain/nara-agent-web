@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useApp, DEFAULT_RPC, genAgentId } from '../store.jsx'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
 import './Settings.css'
@@ -9,7 +9,7 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Settings() {
-  const { model, updateModel, setModelOk, modelOk } = useApp()
+  const { wallet, model, updateModel, setModelOk, modelOk, clearWallet } = useApp()
   const { t, lang, setLang } = useI18n()
 
   const [form, setForm] = useState({
@@ -26,6 +26,14 @@ export default function Settings() {
   const [toast, setToast]           = useState(null)
   const [showKey, setShowKey]       = useState(false)
   const [dirty, setDirty]           = useState(false)
+
+  // Private key display
+  const [showPrivKey, setShowPrivKey] = useState(false)
+
+  // Clear data modal
+  const [clearModal, setClearModal]     = useState(null) // null | 'choose' | 'confirm-wallet' | 'confirm-all'
+  const [countdown, setCountdown]       = useState(0)
+  const countdownRef = useRef(null)
 
   const notify = useCallback((msg, type = 'ok') => setToast({ msg, type }), [])
 
@@ -85,16 +93,39 @@ export default function Settings() {
     setAgentInput(id); setAgentDirty(true)
   }, [])
 
+  // Clear data flow
+  const startCountdown = useCallback((mode) => {
+    setClearModal(mode)
+    setCountdown(5)
+    clearInterval(countdownRef.current)
+    countdownRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) { clearInterval(countdownRef.current); return 0 }
+        return prev - 1
+      })
+    }, 1000)
+  }, [])
+
+  const handleClearConfirm = useCallback(() => {
+    if (clearModal === 'confirm-wallet') {
+      clearWallet()
+      notify(t('settings.walletCleared'))
+    } else if (clearModal === 'confirm-all') {
+      localStorage.clear()
+      window.location.reload()
+    }
+    setClearModal(null)
+    clearInterval(countdownRef.current)
+  }, [clearModal, clearWallet, notify, t])
+
+  useEffect(() => {
+    return () => clearInterval(countdownRef.current)
+  }, [])
+
   return (
     <main className="page settings-page">
       <h1 className="page-title">{t('settings.title')}</h1>
       <p className="page-sub">{t('settings.subtitle')}</p>
-
-      <div style={{ marginBottom: 20 }}>
-        <span className={`badge ${modelOk ? 'badge-ok' : 'badge-off'}`}>
-          {modelOk ? t('settings.modelOnline') : t('settings.modelOffline')}
-        </span>
-      </div>
 
       {/* Language */}
       <div className="card settings-card">
@@ -212,6 +243,76 @@ export default function Settings() {
           ))}
         </div>
       </div>
+
+      {/* Private Key */}
+      {wallet && (
+        <div className="card settings-card">
+          <div className="card-title">{t('settings.privKeyTitle')}</div>
+          <p className="settings-hint" style={{ marginBottom: 10 }}>{t('settings.privKeyWarn')}</p>
+          {showPrivKey ? (
+            <>
+              <code className="wallet-secret-key">{wallet.secretKey}</code>
+              <div style={{ marginTop: 10 }}>
+                <button className="btn btn-ghost" onClick={() => setShowPrivKey(false)}>{t('settings.hidePrivKey')}</button>
+              </div>
+            </>
+          ) : (
+            <button className="btn btn-ghost" onClick={() => setShowPrivKey(true)}>{t('settings.showPrivKey')}</button>
+          )}
+        </div>
+      )}
+
+      {/* Clear Data */}
+      <div className="card settings-card">
+        <div className="card-title">{t('settings.clearData')}</div>
+        <p className="settings-hint" style={{ marginBottom: 10 }}>{t('settings.clearDataHint')}</p>
+        <button className="btn btn-danger" onClick={() => setClearModal('choose')}>{t('settings.clearData')}</button>
+      </div>
+
+      {/* Clear Data Modal — Step 1: Choose */}
+      {clearModal === 'choose' && (
+        <div className="modal-backdrop" onClick={() => setClearModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">{t('settings.clearData')}</div>
+            <p className="modal-body">{t('settings.clearChoose')}</p>
+            <div className="modal-actions" style={{ flexDirection: 'column', gap: 8 }}>
+              {wallet && (
+                <button className="btn btn-danger" style={{ width: '100%' }}
+                  onClick={() => startCountdown('confirm-wallet')}>
+                  {t('settings.clearWalletOnly')}
+                </button>
+              )}
+              <button className="btn btn-danger" style={{ width: '100%' }}
+                onClick={() => startCountdown('confirm-all')}>
+                {t('settings.clearAll')}
+              </button>
+              <button className="btn btn-ghost" style={{ width: '100%' }} onClick={() => setClearModal(null)}>
+                {t('common.cancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear Data Modal — Step 2: Countdown confirm */}
+      {(clearModal === 'confirm-wallet' || clearModal === 'confirm-all') && (
+        <div className="modal-backdrop" onClick={() => { setClearModal(null); clearInterval(countdownRef.current) }}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">
+              {clearModal === 'confirm-wallet' ? t('settings.clearWalletOnly') : t('settings.clearAll')}
+            </div>
+            <p className="modal-body" style={{ color: 'var(--red)' }}>{t('settings.clearWarn')}</p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => { setClearModal(null); clearInterval(countdownRef.current) }}>
+                {t('common.cancel')}
+              </button>
+              <button className="btn btn-danger" disabled={countdown > 0} onClick={handleClearConfirm}>
+                {countdown > 0 ? `${t('settings.confirmIn')} ${countdown}s` : t('settings.confirmClear')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)} />}
     </main>

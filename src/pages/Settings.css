@@ -172,3 +172,16 @@
 @media (max-width: 400px) {
   .preset-list { grid-template-columns: 1fr; }
 }
+
+/* Private key display (reused from wallet) */
+.wallet-secret-key {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--red);
+  word-break: break-all;
+  background: var(--red-glow);
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--red);
+}

@@ -186,7 +186,7 @@ export default function PoMI() {
 
     try {
       // 1. AI generates answer
-      const prompt = `You are answering a blockchain quiz. The question is:\n"${currentQuest.question}"\n\nProvide ONLY the answer text, nothing else. Be concise and precise. One word or short phrase only.`
+      const prompt = `Answer this question. Output ONLY the final answer — no reasoning, no explanation, no steps, no extra words. Just the answer itself.\n\nQuestion: ${currentQuest.question}`
       const res = await fetch(`${model.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${model.apiKey}` },
@@ -207,7 +207,8 @@ export default function PoMI() {
       } catch (e) {
         console.error('Proof failed:', e)
         setPhase('result')
-        setResult({ rewarded: false, error: t('pomi.proofFailed') })
+        setRoundStatus({ answered: false, rewarded: false })
+        setResult({ rewarded: false, error: t('pomi.proofFailed'), aiAnswer })
         return // Don't retry, wait for next round
       }
 
@@ -437,20 +438,26 @@ export default function PoMI() {
             )}
 
             {/* Result */}
-            {phase === 'result' && result && (
+            {(phase === 'result' || phase === 'waiting') && result && (
               <div className={`pomi-result ${result.rewarded ? 'pomi-result-ok' : 'pomi-result-err'}`}>
                 {result.rewarded ? (
                   <>
                     <span className="pomi-result-icon">✓</span>
                     <div>
                       <div>{t('pomi.rewarded')} <strong>{result.rewardNso.toFixed(2)} NARA</strong></div>
+                      {result.aiAnswer && <div className="pomi-result-detail">{t('pomi.aiAnswered')}: {result.aiAnswer}</div>}
                       {result.winner && <div className="pomi-result-detail">{t('pomi.winner')} {result.winner}</div>}
                     </div>
                   </>
                 ) : (
                   <>
                     <span className="pomi-result-icon">✗</span>
-                    <div>{result.error || t('pomi.noReward')}</div>
+                    <div>
+                      <div>{result.error || t('pomi.noReward')}</div>
+                      {result.aiAnswer && (
+                        <div className="pomi-result-detail">{t('pomi.aiAnswered')}: {result.aiAnswer}</div>
+                      )}
+                    </div>
                   </>
                 )}
                 {result.txHash && (
@@ -462,11 +469,6 @@ export default function PoMI() {
               </div>
             )}
 
-            {result?.aiAnswer && (
-              <div className="pomi-ai-answer">
-                <span className="pomi-ai-answer-label">AI:</span> {result.aiAnswer}
-              </div>
-            )}
           </div>
 
           {/* CTA */}
