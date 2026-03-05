@@ -1,6 +1,9 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { Connection, Keypair } from '@solana/web3.js'
+import bs58 from 'bs58'
 import { useApp, DEFAULT_RPC, genAgentId } from '../store.jsx'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
+import { registerAgent, checkAgentRegistered } from '../quest.js'
 import './Settings.css'
 
 function Toast({ msg, type, onClose }) {
@@ -12,6 +15,11 @@ export default function Settings() {
   const { wallet, model, updateModel, setModelOk, modelOk, clearWallet } = useApp()
   const { t, lang, setLang } = useI18n()
 
+  const devMode = useMemo(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('dev') === 'true'
+  }, [])
+
   const [form, setForm] = useState({
     baseUrl:   model.baseUrl   || '',
     modelName: model.model     || '',
@@ -20,7 +28,8 @@ export default function Settings() {
   const [rpcInput, setRpcInput]     = useState(model.rpcUrl || DEFAULT_RPC)
   const [rpcDirty, setRpcDirty]     = useState(false)
   const [agentInput, setAgentInput] = useState(model.agentId || '')
-  const [agentDirty, setAgentDirty] = useState(false)
+  const [agentRegistered, setAgentRegistered] = useState(!!model.agentRegistered)
+  const [registering, setRegistering] = useState(false)
   const [testing, setTesting]       = useState(false)
   const [testResult, setTestResult] = useState(null)
   const [toast, setToast]           = useState(null)
@@ -83,15 +92,46 @@ export default function Settings() {
     setRpcDirty(false); notify(t('settings.rpcSaved'))
   }, [model, updateModel, notify, t])
 
-  const handleSaveAgent = useCallback(() => {
-    updateModel({ ...model, agentId: agentInput.trim() || model.agentId })
-    setAgentDirty(false); notify(t('settings.agentIdSaved'))
-  }, [agentInput, model, updateModel, notify, t])
+  const handleRegisterAgent = useCallback(async () => {
+    const id = agentInput.trim()
+    if (!id) return
+    if (!wallet) { notify(t('settings.noWalletForRegister'), 'err'); return }
+
+    setRegistering(true)
+    try {
+      const rpcUrl = model.rpcUrl || DEFAULT_RPC
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const walletKp = Keypair.fromSecretKey(bs58.decode(wallet.secretKey))
+      await registerAgent(conn, walletKp, id)
+      updateModel({ ...model, agentId: id, agentRegistered: true })
+      setAgentRegistered(true)
+      notify(t('settings.registerSuccess'))
+    } catch (e) {
+      console.error('Register agent error:', e)
+      notify(`${t('settings.registerFailed')}: ${e.message}`, 'err')
+    } finally {
+      setRegistering(false)
+    }
+  }, [agentInput, wallet, model, updateModel, notify, t])
 
   const handleRegenAgent = useCallback(() => {
+    if (agentRegistered) return
     const id = genAgentId()
-    setAgentInput(id); setAgentDirty(true)
-  }, [])
+    setAgentInput(id)
+  }, [agentRegistered])
+
+  // Check if agent is already registered on-chain on mount
+  useEffect(() => {
+    if (model.agentRegistered || !model.agentId) return
+    const rpcUrl = model.rpcUrl || DEFAULT_RPC
+    const conn = new Connection(rpcUrl, 'confirmed')
+    checkAgentRegistered(conn, model.agentId).then(registered => {
+      if (registered) {
+        updateModel({ ...model, agentRegistered: true })
+        setAgentRegistered(true)
+      }
+    }).catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clear data flow
   const startCountdown = useCallback((mode) => {
@@ -140,24 +180,26 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* RPC URL */}
-      <div className="card settings-card">
-        <div className="card-title">{t('settings.rpc')}</div>
-        <div className="input-group" style={{ marginBottom: 8 }}>
-          <div className="input-row">
-            <input className="input" type="url" value={rpcInput}
-              onChange={e => { setRpcInput(e.target.value); setRpcDirty(true) }}
-              placeholder={DEFAULT_RPC} />
-            <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleResetRpc}>
-              {t('settings.resetDefault')}
-            </button>
+      {/* RPC URL — dev mode only */}
+      {devMode && (
+        <div className="card settings-card">
+          <div className="card-title">{t('settings.rpc')}</div>
+          <div className="input-group" style={{ marginBottom: 8 }}>
+            <div className="input-row">
+              <input className="input" type="url" value={rpcInput}
+                onChange={e => { setRpcInput(e.target.value); setRpcDirty(true) }}
+                placeholder={DEFAULT_RPC} />
+              <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleResetRpc}>
+                {t('settings.resetDefault')}
+              </button>
+            </div>
+            <span className="settings-hint">{t('settings.rpcHint')}</span>
           </div>
-          <span className="settings-hint">{t('settings.rpcHint')}</span>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={handleSaveRpc} disabled={!rpcDirty}>{t('settings.save')}</button>
+          </div>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-primary" onClick={handleSaveRpc} disabled={!rpcDirty}>{t('settings.save')}</button>
-        </div>
-      </div>
+      )}
 
       {/* Agent ID */}
       <div className="card settings-card">
@@ -165,17 +207,32 @@ export default function Settings() {
         <div className="input-group" style={{ marginBottom: 8 }}>
           <div className="input-row">
             <input className="input" type="text" value={agentInput}
-              onChange={e => { setAgentInput(e.target.value); setAgentDirty(true) }}
-              placeholder="CYBER-WOLF-1234" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }} />
-            <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleRegenAgent}>
-              {t('settings.regenerate')}
+              onChange={e => { if (!agentRegistered) setAgentInput(e.target.value) }}
+              readOnly={agentRegistered}
+              placeholder="CYBER-WOLF-1234" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', opacity: agentRegistered ? 0.7 : 1 }} />
+            {!agentRegistered && (
+              <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleRegenAgent}>
+                {t('settings.regenerate')}
+              </button>
+            )}
+          </div>
+          <span className="settings-hint">
+            {agentRegistered ? t('settings.agentRegistered') : t('settings.agentIdHint')}
+          </span>
+        </div>
+        {!agentRegistered && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={handleRegisterAgent}
+              disabled={registering || !agentInput.trim()}>
+              {registering ? <><div className="spinner" />{t('settings.registering')}</> : t('settings.register')}
             </button>
           </div>
-          <span className="settings-hint">{t('settings.agentIdHint')}</span>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button className="btn btn-primary" onClick={handleSaveAgent} disabled={!agentDirty}>{t('settings.save')}</button>
-        </div>
+        )}
+        {agentRegistered && (
+          <div className="settings-registered-badge">
+            <span>✓</span> {t('settings.registered')}
+          </div>
+        )}
       </div>
 
       {/* AI Model */}

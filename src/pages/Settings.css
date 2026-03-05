@@ -173,6 +173,20 @@
   .preset-list { grid-template-columns: 1fr; }
 }
 
+/* Registered badge */
+.settings-registered-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--green);
+  padding: 8px 12px;
+  background: var(--green-glow);
+  border: 1px solid var(--green);
+  border-radius: var(--radius);
+}
+
 /* Private key display (reused from wallet) */
 .wallet-secret-key {
   display: block;

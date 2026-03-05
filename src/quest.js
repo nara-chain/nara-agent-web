@@ -6,6 +6,7 @@ import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.j
 import * as anchor from '@coral-xyz/anchor'
 import { Program, AnchorProvider } from '@coral-xyz/anchor'
 import naraQuestIdl from '../node_modules/nara-sdk/src/idls/nara_quest.json'
+import naraAgentRegistryIdl from '../node_modules/nara-sdk/src/idls/nara_agent_registry.json'
 
 // Anchor browser build doesn't export Wallet — minimal implementation
 class NodeWallet {
@@ -15,6 +16,7 @@ class NodeWallet {
 }
 
 const QUEST_PROGRAM_ID = 'Quest11111111111111111111111111111111111111'
+const AGENT_REGISTRY_PROGRAM_ID = 'AgentRegistry111111111111111111111111111111'
 const RELAY_URL = 'https://quest-api.nara.build'
 
 // ── ZK constants ────────────────────────────────────────────────
@@ -293,5 +295,87 @@ export async function parseQuestReward(connection, txSignature, retries = 10) {
     rewardLamports,
     rewardNso: rewardLamports / LAMPORTS_PER_SOL,
     winner,
+  }
+}
+
+// ── Agent Registry ─────────────────────────────────────────────
+
+function createRegistryProgram(connection, wallet) {
+  const idlWithPid = { ...naraAgentRegistryIdl, address: AGENT_REGISTRY_PROGRAM_ID }
+  const provider = new AnchorProvider(
+    connection,
+    new NodeWallet(wallet),
+    { commitment: 'confirmed' }
+  )
+  anchor.setProvider(provider)
+  return new Program(idlWithPid, provider)
+}
+
+function getConfigPda() {
+  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
+  const [pda] = PublicKey.findProgramAddressSync([Buffer.from('config')], pid)
+  return pda
+}
+
+function getAgentPda(agentId) {
+  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
+  const [pda] = PublicKey.findProgramAddressSync(
+    [Buffer.from('agent'), Buffer.from(agentId)],
+    pid
+  )
+  return pda
+}
+
+/**
+ * Register an agent on-chain (browser-compatible, no WebSocket)
+ */
+export async function registerAgent(connection, walletKeypair, agentId) {
+  const program = createRegistryProgram(connection, walletKeypair)
+  const configPda = getConfigPda()
+  const config = await program.account.programConfig.fetch(configPda)
+
+  const tx = await program.methods
+    .registerAgent(agentId)
+    .accounts({
+      authority: walletKeypair.publicKey,
+      feeRecipient: config.feeRecipient,
+    })
+    .signers([walletKeypair])
+    .transaction()
+
+  tx.feePayer = walletKeypair.publicKey
+  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash
+  tx.sign(walletKeypair)
+
+  const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false })
+
+  // Poll for confirmation
+  const start = Date.now()
+  while (Date.now() - start < 15000) {
+    await new Promise(r => setTimeout(r, 2000))
+    try {
+      const { value } = await connection.getSignatureStatuses([signature])
+      const status = value?.[0]
+      if (status?.err) throw new Error(`Registration failed: ${JSON.stringify(status.err)}`)
+      if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
+        return { signature, agentPubkey: getAgentPda(agentId) }
+      }
+    } catch (e) {
+      if (e.message.includes('Registration failed')) throw e
+    }
+  }
+  throw new Error('Registration confirmation timeout')
+}
+
+/**
+ * Check if an agent ID is already registered on-chain
+ */
+export async function checkAgentRegistered(connection, agentId) {
+  try {
+    const agentPda = getAgentPda(agentId)
+    const info = await connection.getAccountInfo(agentPda)
+    return !!info
+  } catch {
+    return false
   }
 }

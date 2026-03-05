@@ -15,7 +15,7 @@ export default function Nav() {
     <nav className="nav">
       <div className="nav-inner">
         <div className="nav-brand">
-          <span className="nav-logo">N</span>
+          <img className="nav-logo" src="/favicon.png" alt="NARA" />
           <span className="nav-name">NARA</span>
         </div>
 
