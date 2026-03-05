@@ -392,7 +392,7 @@ export default function PoMI() {
         <>
           {/* Timer ring */}
           <div className={`pomi-timer-wrap ${urgent ? 'urgent' : ''}`}>
-            <svg className="pomi-ring" viewBox="0 0 120 120">
+            <svg className="pomi-ring" viewBox="-10 -10 140 140">
               <circle cx="60" cy="60" r="54" className="ring-bg" />
               <circle
                 cx="60" cy="60" r="54"
