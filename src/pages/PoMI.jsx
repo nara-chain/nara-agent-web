@@ -217,11 +217,14 @@ export default function PoMI() {
       const modelId = model.model || ''
 
       // Build activityLog if agent is registered
+      const answerHash = Array.from(
+        new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(aiAnswer)))
+      ).map(b => b.toString(16).padStart(2, '0')).join('')
       const activityLog = model.agentRegistered ? {
         agentId,
         model: modelId,
         activity: 'PoMI',
-        log: aiAnswer,
+        log: answerHash,
         referralAgentId: referral || undefined,
       } : null
 
