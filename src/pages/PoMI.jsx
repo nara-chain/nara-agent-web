@@ -220,7 +220,7 @@ export default function PoMI() {
       const activityLog = model.agentRegistered ? {
         agentId,
         model: modelId,
-        activity: 'quest_answer',
+        activity: 'PoMI',
         log: aiAnswer,
         referralAgentId: referral || undefined,
       } : null
