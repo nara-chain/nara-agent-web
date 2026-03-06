@@ -91,6 +91,15 @@
   50% { opacity: 0.3; }
 }
 
+.nav-github {
+  opacity: 0.4;
+  padding: 6px;
+}
+
+.nav-github:hover {
+  opacity: 1;
+}
+
 @media (max-width: 380px) {
   .nav-link span:not(.nav-dot) { display: none; }
   .nav-link { padding: 8px; }
