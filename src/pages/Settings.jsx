@@ -1,10 +1,9 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Connection, Keypair } from '@solana/web3.js'
 import bs58 from 'bs58'
-import { useApp, DEFAULT_RPC, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY, genAgentId } from '../store.jsx'
-import { IS_TESTNET } from '../constants.js'
+import { useApp, genAgentId } from '../store.jsx'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
-import { registerAgent, checkAgentRegistered, getAgentPoints } from '../quest.js'
+import { registerAgent, checkAgentRegistered, getAgentPoints, getRegistryConfig } from '../quest.js'
 import './Settings.css'
 
 function Toast({ msg, type, onClose }) {
@@ -13,7 +12,7 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Settings() {
-  const { wallet, model, updateModel, setModelOk, modelOk, clearWallet, rpcUrl } = useApp()
+  const { wallet, model, updateModel, setModelOk, modelOk, clearWallet, rpcUrl, referral, setReferral } = useApp()
   const { t, lang, setLang } = useI18n()
 
   const devMode = useMemo(() => {
@@ -26,11 +25,6 @@ export default function Settings() {
     modelName: model.model     || '',
     apiKey:    model.apiKey    || '',
   })
-  const [rpcInput, setRpcInput]     = useState(model.rpcUrl || DEFAULT_RPC)
-  const [rpcDirty, setRpcDirty]     = useState(false)
-  const [testnetRpc, setTestnetRpc] = useState(model.testnetRpcUrl || DEFAULT_TESTNET_RPC)
-  const [testnetRelay, setTestnetRelay] = useState(model.testnetRelayUrl || DEFAULT_TESTNET_RELAY)
-  const [testnetDirty, setTestnetDirty] = useState(false)
   const [agentInput, setAgentInput] = useState(model.agentId || '')
   const [agentRegistered, setAgentRegistered] = useState(!!model.agentRegistered)
   const [agentPoints, setAgentPoints] = useState(null)
@@ -40,6 +34,10 @@ export default function Settings() {
   const [toast, setToast]           = useState(null)
   const [showKey, setShowKey]       = useState(false)
   const [dirty, setDirty]           = useState(false)
+
+  // Dev JSON editor
+  const [jsonEdit, setJsonEdit] = useState('')
+  const [jsonDirty, setJsonDirty] = useState(false)
 
   // Private key display
   const [showPrivKey, setShowPrivKey] = useState(false)
@@ -86,17 +84,6 @@ export default function Settings() {
     } finally { setTesting(false) }
   }, [form, model, updateModel, setModelOk, notify, t])
 
-  const handleSaveRpc = useCallback(() => {
-    updateModel({ ...model, rpcUrl: rpcInput.trim() || DEFAULT_RPC })
-    setRpcDirty(false); notify(t('settings.rpcSaved'))
-  }, [rpcInput, model, updateModel, notify, t])
-
-  const handleResetRpc = useCallback(() => {
-    setRpcInput(DEFAULT_RPC)
-    updateModel({ ...model, rpcUrl: DEFAULT_RPC })
-    setRpcDirty(false); notify(t('settings.rpcSaved'))
-  }, [model, updateModel, notify, t])
-
   const handleRegisterAgent = useCallback(async () => {
     const id = agentInput.trim()
     if (!id) return
@@ -106,6 +93,17 @@ export default function Settings() {
     try {
       const conn = new Connection(rpcUrl, 'confirmed')
       const walletKp = Keypair.fromSecretKey(bs58.decode(wallet.secretKey))
+
+      // Check balance against on-chain register fee
+      const [balance, config] = await Promise.all([
+        conn.getBalance(walletKp.publicKey),
+        getRegistryConfig(conn),
+      ])
+      if (balance < config.registerFee + 10_000) {
+        notify(`${t('settings.insufficientBalance')} (${(config.registerFee / 1e9).toFixed(4)} NARA)`, 'err')
+        return
+      }
+
       await registerAgent(conn, walletKp, id)
       updateModel({ ...model, agentId: id, agentRegistered: true })
       setAgentRegistered(true)
@@ -117,7 +115,7 @@ export default function Settings() {
     } finally {
       setRegistering(false)
     }
-  }, [agentInput, wallet, model, updateModel, notify, t])
+  }, [agentInput, wallet, model, updateModel, notify, t, rpcUrl])
 
   const handleRegenAgent = useCallback(() => {
     if (agentRegistered) return
@@ -142,12 +140,6 @@ export default function Settings() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleSaveTestnet = useCallback(() => {
-    updateModel({ ...model, testnetRpcUrl: testnetRpc.trim() || DEFAULT_TESTNET_RPC, testnetRelayUrl: testnetRelay.trim() || DEFAULT_TESTNET_RELAY })
-    setTestnetDirty(false)
-    notify(t('settings.saved'))
-  }, [testnetRpc, testnetRelay, model, updateModel, notify, t])
-
   // Clear data flow
   const startCountdown = useCallback((mode) => {
     setClearModal(mode)
@@ -164,6 +156,10 @@ export default function Settings() {
   const handleClearConfirm = useCallback(() => {
     if (clearModal === 'confirm-wallet') {
       clearWallet()
+      // Also clear agent registration status
+      updateModel({ ...model, agentRegistered: false })
+      setAgentRegistered(false)
+      setAgentPoints(null)
       notify(t('settings.walletCleared'))
     } else if (clearModal === 'confirm-all') {
       localStorage.clear()
@@ -171,7 +167,7 @@ export default function Settings() {
     }
     setClearModal(null)
     clearInterval(countdownRef.current)
-  }, [clearModal, clearWallet, notify, t])
+  }, [clearModal, clearWallet, model, updateModel, notify, t])
 
   useEffect(() => {
     return () => clearInterval(countdownRef.current)
@@ -195,64 +191,34 @@ export default function Settings() {
         </div>
       </div>
 
-      {/* RPC URL — dev mode only */}
-      {devMode && (
-        <div className="card settings-card">
-          <div className="card-title">{t('settings.rpc')}</div>
-          <div className="input-group" style={{ marginBottom: 8 }}>
-            <div className="input-row">
-              <input className="input" type="url" value={rpcInput}
-                onChange={e => { setRpcInput(e.target.value); setRpcDirty(true) }}
-                placeholder={DEFAULT_RPC} />
-              <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleResetRpc}>
-                {t('settings.resetDefault')}
-              </button>
-            </div>
-            <span className="settings-hint">{t('settings.rpcHint')}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" onClick={handleSaveRpc} disabled={!rpcDirty}>{t('settings.save')}</button>
-          </div>
-        </div>
-      )}
-
-      {/* Testnet URLs — visible when IS_TESTNET and dev mode */}
-      {IS_TESTNET && devMode && (
-        <div className="card settings-card">
-          <div className="card-title">{t('settings.testnet')}</div>
-          <div className="settings-fields">
-            <div className="input-group">
-              <label className="input-label">{t('settings.testnetRpc')}</label>
-              <input className="input" type="url" value={testnetRpc}
-                onChange={e => { setTestnetRpc(e.target.value); setTestnetDirty(true) }}
-                placeholder={DEFAULT_TESTNET_RPC} />
-            </div>
-            <div className="input-group">
-              <label className="input-label">{t('settings.testnetRelay')}</label>
-              <input className="input" type="url" value={testnetRelay}
-                onChange={e => { setTestnetRelay(e.target.value); setTestnetDirty(true) }}
-                placeholder={DEFAULT_TESTNET_RELAY} />
-            </div>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" onClick={handleSaveTestnet} disabled={!testnetDirty}>{t('settings.save')}</button>
-          </div>
-        </div>
-      )}
-
       {/* Agent ID */}
       <div className="card settings-card">
-        <div className="card-title">{t('settings.agentId')}</div>
-        <div className="input-group" style={{ marginBottom: 8 }}>
+        <div className="agent-header">
+          <div className="card-title">{t('settings.agentId')}</div>
+          {agentRegistered && (
+            <div className="agent-status">
+              <span className="agent-status-dot" />
+              <span className="agent-status-text">{t('settings.registered')}</span>
+              <span className="agent-points-inline">{agentPoints ?? '—'} pts</span>
+            </div>
+          )}
+        </div>
+        <div className="input-group">
           <div className="input-row">
             <input className="input" type="text" value={agentInput}
               onChange={e => { if (!agentRegistered) setAgentInput(e.target.value) }}
               readOnly={agentRegistered}
-              placeholder="CYBER-WOLF-1234" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', opacity: agentRegistered ? 0.7 : 1 }} />
+              placeholder="cyber-wolf-1234" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }} />
             {!agentRegistered ? (
-              <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleRegenAgent}>
-                {t('settings.regenerate')}
-              </button>
+              <>
+                <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleRegenAgent}>
+                  {t('settings.regenerate')}
+                </button>
+                <button className="btn btn-primary" style={{ flexShrink: 0 }} onClick={handleRegisterAgent}
+                  disabled={registering || !agentInput.trim()}>
+                  {registering ? <><div className="spinner" />{t('settings.registering')}</> : t('settings.register')}
+                </button>
+              </>
             ) : (
               <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={() => {
                 const encoded = bs58.encode(new TextEncoder().encode(agentInput))
@@ -267,25 +233,6 @@ export default function Settings() {
             {agentRegistered ? t('settings.agentRegistered') : t('settings.agentIdHint')}
           </span>
         </div>
-        {!agentRegistered && (
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" onClick={handleRegisterAgent}
-              disabled={registering || !agentInput.trim()}>
-              {registering ? <><div className="spinner" />{t('settings.registering')}</> : t('settings.register')}
-            </button>
-          </div>
-        )}
-        {agentRegistered && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div className="settings-registered-badge">
-              <span>✓</span> {t('settings.registered')}
-            </div>
-            <div className="settings-agent-points">
-              <span className="settings-agent-points-value">{agentPoints ?? '—'}</span>
-              <span className="settings-agent-points-label">{t('settings.points')}</span>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* AI Model */}
@@ -378,6 +325,48 @@ export default function Settings() {
         <p className="settings-hint" style={{ marginBottom: 10 }}>{t('settings.clearDataHint')}</p>
         <button className="btn btn-danger" onClick={() => setClearModal('choose')}>{t('settings.clearData')}</button>
       </div>
+
+      {/* Dev JSON Editor */}
+      {devMode && (
+        <div className="card settings-card">
+          <div className="card-title">Dev: App State</div>
+          <div className="input-group" style={{ marginBottom: 8 }}>
+            <label className="input-label">Referral</label>
+            <div className="input-row">
+              <input className="input" type="text" value={referral}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                onChange={e => setReferral(e.target.value)} />
+              {referral && (
+                <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={() => setReferral('')}>
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+          <label className="input-label">Model JSON</label>
+          <textarea className="input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12, minHeight: 200, resize: 'vertical', whiteSpace: 'pre' }}
+            value={jsonEdit || JSON.stringify(model, null, 2)}
+            onChange={e => { setJsonEdit(e.target.value); setJsonDirty(true) }} />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8, gap: 8 }}>
+            <button className="btn btn-ghost" onClick={() => { setJsonEdit(''); setJsonDirty(false) }}>
+              Reset
+            </button>
+            <button className="btn btn-primary" disabled={!jsonDirty} onClick={() => {
+              try {
+                const parsed = JSON.parse(jsonEdit)
+                updateModel(parsed)
+                setJsonEdit('')
+                setJsonDirty(false)
+                notify('JSON saved')
+              } catch (e) {
+                notify(`Invalid JSON: ${e.message}`, 'err')
+              }
+            }}>
+              Save
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Clear Data Modal — Step 1: Choose */}
       {clearModal === 'choose' && (

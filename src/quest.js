@@ -369,9 +369,33 @@ function getAgentPda(agentId) {
 }
 
 /**
+ * Fetch agent registry program config (register fee, points config, etc.)
+ */
+export async function getRegistryConfig(connection) {
+  try {
+    const configPda = getConfigPda()
+    const info = await connection.getAccountInfo(configPda)
+    if (!info) throw new Error('Program config not initialized')
+    const buf = Buffer.from(info.data)
+    let offset = 8 // skip discriminator
+    const admin = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
+    const feeRecipient = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
+    const registerFee = Number(buf.readBigUInt64LE(offset)); offset += 8
+    const pointsSelf = Number(buf.readBigUInt64LE(offset)); offset += 8
+    const pointsReferral = Number(buf.readBigUInt64LE(offset))
+    return { admin, feeRecipient, registerFee, pointsSelf, pointsReferral }
+  } catch (e) {
+    throw new Error(`Failed to fetch registry config: ${e.message}`)
+  }
+}
+
+/**
  * Register an agent on-chain (browser-compatible, no WebSocket)
  */
 export async function registerAgent(connection, walletKeypair, agentId) {
+  if (/[A-Z]/.test(agentId)) {
+    throw new Error('Agent ID must be lowercase')
+  }
   const program = createRegistryProgram(connection, walletKeypair)
   const configPda = getConfigPda()
   const config = await program.account.programConfig.fetch(configPda)

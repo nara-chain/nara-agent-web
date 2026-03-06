@@ -19,7 +19,7 @@ function AppShell() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const ref = params.get('referral')
-    if (!ref || referral) return // already have a valid referral, don't overwrite
+    if (!ref) return
 
     let agentId
     try {

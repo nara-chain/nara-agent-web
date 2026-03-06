@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback } from 'react'
 
 // ── Wallet helpers ──────────────────────────────────────────────
 const WALLET_KEY    = 'nara_wallet_v1'
@@ -8,6 +8,9 @@ const REFERRAL_KEY  = 'nara_referral_v1'
 
 export { IS_TESTNET, DEFAULT_RPC, DEFAULT_RELAY, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY } from './constants.js'
 import { IS_TESTNET, DEFAULT_RPC, DEFAULT_RELAY, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY } from './constants.js'
+
+const RPC_URL   = IS_TESTNET ? DEFAULT_TESTNET_RPC   : DEFAULT_RPC
+const RELAY_URL = IS_TESTNET ? DEFAULT_TESTNET_RELAY  : DEFAULT_RELAY
 
 // ── Agent ID generator ──────────────────────────────────────────
 const _ADJ  = ['cyber','quantum','neural','ghost','phantom','iron','neon','delta','swift','void','sigma','alpha','nova','prime','pulse']
@@ -34,10 +37,10 @@ export function loadModel() {
   try {
     const raw  = localStorage.getItem(MODEL_KEY)
     const saved = raw ? JSON.parse(raw) : {}
-    const data  = { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId(), testnetRpcUrl: DEFAULT_TESTNET_RPC, testnetRelayUrl: DEFAULT_TESTNET_RELAY, ...saved }
+    const data  = { baseUrl: '', model: '', apiKey: '', agentId: genAgentId(), ...saved }
     if (!saved.agentId) localStorage.setItem(MODEL_KEY, JSON.stringify(data)) // persist generated ID
     return data
-  } catch { return { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId(), testnetRpcUrl: DEFAULT_TESTNET_RPC, testnetRelayUrl: DEFAULT_TESTNET_RELAY } }
+  } catch { return { baseUrl: '', model: '', apiKey: '', agentId: genAgentId() } }
 }
 
 export function saveModel(data) {
@@ -82,20 +85,8 @@ export function AppProvider({ children }) {
     setWallet(null)
   }, [])
 
-  // Computed effective URLs based on IS_TESTNET constant
-  const rpcUrl = useMemo(() =>
-    IS_TESTNET
-      ? (model.testnetRpcUrl || DEFAULT_TESTNET_RPC)
-      : (model.rpcUrl || DEFAULT_RPC),
-    [model.testnetRpcUrl, model.rpcUrl]
-  )
-
-  const relayUrl = useMemo(() =>
-    IS_TESTNET
-      ? (model.testnetRelayUrl || DEFAULT_TESTNET_RELAY)
-      : DEFAULT_RELAY,
-    [model.testnetRelayUrl]
-  )
+  const rpcUrl   = RPC_URL
+  const relayUrl = RELAY_URL
 
   return (
     <AppContext.Provider value={{
