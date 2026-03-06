@@ -2,7 +2,7 @@
  * Browser-compatible quest module
  * Adapted from nara-sdk/src/quest.ts — no Node.js fs/path/url imports
  */
-import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
+import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL, SYSVAR_INSTRUCTIONS_PUBKEY, Transaction } from '@solana/web3.js'
 import * as anchor from '@coral-xyz/anchor'
 import { Program, AnchorProvider } from '@coral-xyz/anchor'
 import naraQuestIdl from '../node_modules/nara-sdk/src/idls/nara_quest.json'
@@ -17,7 +17,7 @@ class NodeWallet {
 
 const QUEST_PROGRAM_ID = 'Quest11111111111111111111111111111111111111'
 const AGENT_REGISTRY_PROGRAM_ID = 'AgentRegistry111111111111111111111111111111'
-const RELAY_URL = 'https://quest-api.nara.build'
+const DEFAULT_RELAY_URL = 'https://quest-api.nara.build'
 
 // ── ZK constants ────────────────────────────────────────────────
 const BN254_FIELD = 21888242871839275222246405745257275088696311157297823662689037894645226208583n
@@ -207,19 +207,23 @@ export async function generateProof(answer, answerHash, userPubkey) {
 /**
  * Submit answer via relay (gasless) — for wallets with no balance
  */
-export async function submitAnswerViaRelay(userPubkey, proofHex, agent = '', model = '') {
-  const base = RELAY_URL.replace(/\/+$/, '')
+export async function submitAnswerViaRelay(relayUrl, userPubkey, proofHex, agent = '', model = '', activityLog = null) {
+  const base = relayUrl.replace(/\/+$/, '')
+  const body = {
+    user: userPubkey.toBase58(),
+    proofA: proofHex.proofA,
+    proofB: proofHex.proofB,
+    proofC: proofHex.proofC,
+    agent,
+    model,
+  }
+  if (activityLog) {
+    body.activityLog = activityLog
+  }
   const res = await fetch(`${base}/submit-answer`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      user: userPubkey.toBase58(),
-      proofA: proofHex.proofA,
-      proofB: proofHex.proofB,
-      proofC: proofHex.proofC,
-      agent,
-      model,
-    }),
+    body: JSON.stringify(body),
   })
 
   const data = await res.json()
@@ -230,15 +234,32 @@ export async function submitAnswerViaRelay(userPubkey, proofHex, agent = '', mod
 }
 
 /**
- * Submit answer directly on-chain (requires SOL for gas)
+ * Submit answer directly on-chain (requires SOL for gas).
+ * If activityLog is provided and agent is registered, appends a logActivity IX.
+ * activityLog: { agentId, model, activity, log, referralAgentId? }
  */
-export async function submitAnswerDirect(connection, walletKeypair, proofSolana, agent = '', model = '') {
+export async function submitAnswerDirect(connection, walletKeypair, proofSolana, agent = '', model = '', activityLog = null) {
   const program = createProgram(connection, walletKeypair)
-  const tx = await program.methods
+
+  const submitIx = await program.methods
     .submitAnswer(proofSolana.proofA, proofSolana.proofB, proofSolana.proofC, agent, model)
     .accounts({ user: walletKeypair.publicKey, payer: walletKeypair.publicKey })
-    .signers([walletKeypair])
-    .transaction()
+    .instruction()
+
+  const tx = new Transaction().add(submitIx)
+
+  if (activityLog) {
+    const logIx = await makeLogActivityIx(
+      connection,
+      walletKeypair.publicKey,
+      activityLog.agentId,
+      activityLog.model,
+      activityLog.activity,
+      activityLog.log,
+      activityLog.referralAgentId
+    )
+    tx.add(logIx)
+  }
 
   tx.feePayer = walletKeypair.publicKey
   tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash
@@ -296,6 +317,27 @@ export async function parseQuestReward(connection, txSignature, retries = 10) {
     rewardNso: rewardLamports / LAMPORTS_PER_SOL,
     winner,
   }
+}
+
+// ── Log Activity ──────────────────────────────────────────────
+
+/**
+ * Build a logActivity instruction (browser-compatible).
+ * Used to append to submit-answer transactions for registered agents.
+ */
+export async function makeLogActivityIx(connection, authority, agentId, model, activity, log, referralAgentId) {
+  const program = createRegistryProgram(connection, Keypair.generate())
+  const accounts = {
+    authority,
+    instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
+    referralAgent: referralAgentId
+      ? getAgentPda(referralAgentId)
+      : null,
+  }
+  return program.methods
+    .logActivity(agentId, model, activity, log)
+    .accounts(accounts)
+    .instruction()
 }
 
 // ── Agent Registry ─────────────────────────────────────────────

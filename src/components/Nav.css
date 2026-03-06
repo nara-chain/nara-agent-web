@@ -4,8 +4,9 @@
   left: 0;
   right: 0;
   height: var(--nav-h);
-  background: transparent;
-  border-bottom: none;
+  background: rgba(8, 8, 8, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
   z-index: 100;
 }
 

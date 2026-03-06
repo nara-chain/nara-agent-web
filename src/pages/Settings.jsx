@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Connection, Keypair } from '@solana/web3.js'
 import bs58 from 'bs58'
-import { useApp, DEFAULT_RPC, genAgentId } from '../store.jsx'
+import { useApp, DEFAULT_RPC, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY, genAgentId } from '../store.jsx'
+import { IS_TESTNET } from '../constants.js'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
 import { registerAgent, checkAgentRegistered } from '../quest.js'
 import './Settings.css'
@@ -12,7 +13,7 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Settings() {
-  const { wallet, model, updateModel, setModelOk, modelOk, clearWallet } = useApp()
+  const { wallet, model, updateModel, setModelOk, modelOk, clearWallet, rpcUrl } = useApp()
   const { t, lang, setLang } = useI18n()
 
   const devMode = useMemo(() => {
@@ -27,6 +28,9 @@ export default function Settings() {
   })
   const [rpcInput, setRpcInput]     = useState(model.rpcUrl || DEFAULT_RPC)
   const [rpcDirty, setRpcDirty]     = useState(false)
+  const [testnetRpc, setTestnetRpc] = useState(model.testnetRpcUrl || DEFAULT_TESTNET_RPC)
+  const [testnetRelay, setTestnetRelay] = useState(model.testnetRelayUrl || DEFAULT_TESTNET_RELAY)
+  const [testnetDirty, setTestnetDirty] = useState(false)
   const [agentInput, setAgentInput] = useState(model.agentId || '')
   const [agentRegistered, setAgentRegistered] = useState(!!model.agentRegistered)
   const [registering, setRegistering] = useState(false)
@@ -99,7 +103,6 @@ export default function Settings() {
 
     setRegistering(true)
     try {
-      const rpcUrl = model.rpcUrl || DEFAULT_RPC
       const conn = new Connection(rpcUrl, 'confirmed')
       const walletKp = Keypair.fromSecretKey(bs58.decode(wallet.secretKey))
       await registerAgent(conn, walletKp, id)
@@ -123,7 +126,6 @@ export default function Settings() {
   // Check if agent is already registered on-chain on mount
   useEffect(() => {
     if (model.agentRegistered || !model.agentId) return
-    const rpcUrl = model.rpcUrl || DEFAULT_RPC
     const conn = new Connection(rpcUrl, 'confirmed')
     checkAgentRegistered(conn, model.agentId).then(registered => {
       if (registered) {
@@ -132,6 +134,12 @@ export default function Settings() {
       }
     }).catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSaveTestnet = useCallback(() => {
+    updateModel({ ...model, testnetRpcUrl: testnetRpc.trim() || DEFAULT_TESTNET_RPC, testnetRelayUrl: testnetRelay.trim() || DEFAULT_TESTNET_RELAY })
+    setTestnetDirty(false)
+    notify(t('settings.saved'))
+  }, [testnetRpc, testnetRelay, model, updateModel, notify, t])
 
   // Clear data flow
   const startCountdown = useCallback((mode) => {
@@ -197,6 +205,30 @@ export default function Settings() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <button className="btn btn-primary" onClick={handleSaveRpc} disabled={!rpcDirty}>{t('settings.save')}</button>
+          </div>
+        </div>
+      )}
+
+      {/* Testnet URLs — visible when IS_TESTNET and dev mode */}
+      {IS_TESTNET && devMode && (
+        <div className="card settings-card">
+          <div className="card-title">{t('settings.testnet')}</div>
+          <div className="settings-fields">
+            <div className="input-group">
+              <label className="input-label">{t('settings.testnetRpc')}</label>
+              <input className="input" type="url" value={testnetRpc}
+                onChange={e => { setTestnetRpc(e.target.value); setTestnetDirty(true) }}
+                placeholder={DEFAULT_TESTNET_RPC} />
+            </div>
+            <div className="input-group">
+              <label className="input-label">{t('settings.testnetRelay')}</label>
+              <input className="input" type="url" value={testnetRelay}
+                onChange={e => { setTestnetRelay(e.target.value); setTestnetDirty(true) }}
+                placeholder={DEFAULT_TESTNET_RELAY} />
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="btn btn-primary" onClick={handleSaveTestnet} disabled={!testnetDirty}>{t('settings.save')}</button>
           </div>
         </div>
       )}

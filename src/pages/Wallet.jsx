@@ -3,7 +3,7 @@ import { Keypair, Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PE
 import * as bip39 from 'bip39'
 import { derivePath } from 'ed25519-hd-key'
 import bs58 from 'bs58'
-import { useApp, DEFAULT_RPC } from '../store.jsx'
+import { useApp } from '../store.jsx'
 import { useI18n } from '../i18n.jsx'
 import './Wallet.css'
 
@@ -24,9 +24,8 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Wallet() {
-  const { wallet, setWallet, model } = useApp()
+  const { wallet, setWallet, rpcUrl } = useApp()
   const { t } = useI18n()
-  const rpcUrl = model.rpcUrl || DEFAULT_RPC
 
   const [tab, setTab]               = useState('main')
   const [importMode, setImportMode] = useState('mnemonic')

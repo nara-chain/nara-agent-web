@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Connection, Keypair, PublicKey } from '@solana/web3.js'
 import bs58 from 'bs58'
-import { useApp, DEFAULT_RPC } from '../store.jsx'
+import { useApp } from '../store.jsx'
 import { useI18n } from '../i18n.jsx'
 import {
   fetchQuestAndStatus,
@@ -47,7 +47,7 @@ function DifficultyBar({ level, t }) {
 
 export default function PoMI() {
   const navigate = useNavigate()
-  const { wallet, model, modelOk, setModelOk } = useApp()
+  const { wallet, model, modelOk, setModelOk, rpcUrl, relayUrl, referral } = useApp()
   const { t } = useI18n()
 
   // Quest state
@@ -71,8 +71,6 @@ export default function PoMI() {
   const abortRef = useRef(null)
   const timerRef = useRef(null)
   const pollRef = useRef(null)
-
-  const rpcUrl = model.rpcUrl || DEFAULT_RPC
 
   // Keep miningRef in sync
   useEffect(() => { miningRef.current = mining }, [mining])
@@ -217,15 +215,25 @@ export default function PoMI() {
       const balance = await getBalance(conn, walletKp.publicKey)
       const agentId = model.agentId || ''
       const modelId = model.model || ''
+
+      // Build activityLog if agent is registered
+      const activityLog = model.agentRegistered ? {
+        agentId,
+        model: modelId,
+        activity: 'quest_answer',
+        log: aiAnswer,
+        referralAgentId: referral || undefined,
+      } : null
+
       let txHash
 
       if (balance > 10_000_000) {
         setStatus(t('pomi.submitting'))
-        const { signature } = await submitAnswerDirect(conn, walletKp, proof.solana, agentId, modelId)
+        const { signature } = await submitAnswerDirect(conn, walletKp, proof.solana, agentId, modelId, activityLog)
         txHash = signature
       } else {
         setStatus(t('pomi.submittingRelay'))
-        const { txHash: hash } = await submitAnswerViaRelay(walletKp.publicKey, proof.hex, agentId, modelId)
+        const { txHash: hash } = await submitAnswerViaRelay(relayUrl, walletKp.publicKey, proof.hex, agentId, modelId, activityLog)
         txHash = hash
       }
 
@@ -265,7 +273,7 @@ export default function PoMI() {
       setResult({ rewarded: false, error: msg, txHash: errTx })
       // Don't retry, wait for next round
     }
-  }, [wallet, model, rpcUrl, t, setModelOk])
+  }, [wallet, model, rpcUrl, relayUrl, t, setModelOk])
 
   // ── Auto-mining loop ──────────────────────────────────────
   const startMiningLoop = useCallback(async () => {

@@ -1,15 +1,17 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react'
 
 // ── Wallet helpers ──────────────────────────────────────────────
-const WALLET_KEY   = 'nara_wallet_v1'
-const MODEL_KEY    = 'nara_model_v1'
-const MODEL_OK_KEY = 'nara_model_ok_v1'
+const WALLET_KEY    = 'nara_wallet_v1'
+const MODEL_KEY     = 'nara_model_v1'
+const MODEL_OK_KEY  = 'nara_model_ok_v1'
+const REFERRAL_KEY  = 'nara_referral_v1'
 
-export const DEFAULT_RPC = 'https://mainnet-api.nara.build/'
+export { IS_TESTNET, DEFAULT_RPC, DEFAULT_RELAY, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY } from './constants.js'
+import { IS_TESTNET, DEFAULT_RPC, DEFAULT_RELAY, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY } from './constants.js'
 
 // ── Agent ID generator ──────────────────────────────────────────
-const _ADJ  = ['CYBER','QUANTUM','NEURAL','GHOST','PHANTOM','IRON','NEON','DELTA','SWIFT','VOID','SIGMA','ALPHA','NOVA','PRIME','PULSE']
-const _NOUN = ['WOLF','EAGLE','CIPHER','NODE','BYTE','FLUX','GRID','APEX','NEXUS','HAWK','RAVEN','FORGE','ECHO','SPARK','CORE']
+const _ADJ  = ['cyber','quantum','neural','ghost','phantom','iron','neon','delta','swift','void','sigma','alpha','nova','prime','pulse']
+const _NOUN = ['wolf','eagle','cipher','node','byte','flux','grid','apex','nexus','hawk','raven','forge','echo','spark','core']
 export function genAgentId() {
   const a = _ADJ[Math.floor(Math.random() * _ADJ.length)]
   const n = _NOUN[Math.floor(Math.random() * _NOUN.length)]
@@ -32,10 +34,10 @@ export function loadModel() {
   try {
     const raw  = localStorage.getItem(MODEL_KEY)
     const saved = raw ? JSON.parse(raw) : {}
-    const data  = { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId(), ...saved }
+    const data  = { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId(), testnetRpcUrl: DEFAULT_TESTNET_RPC, testnetRelayUrl: DEFAULT_TESTNET_RELAY, ...saved }
     if (!saved.agentId) localStorage.setItem(MODEL_KEY, JSON.stringify(data)) // persist generated ID
     return data
-  } catch { return { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId() } }
+  } catch { return { baseUrl: '', model: '', apiKey: '', rpcUrl: DEFAULT_RPC, agentId: genAgentId(), testnetRpcUrl: DEFAULT_TESTNET_RPC, testnetRelayUrl: DEFAULT_TESTNET_RELAY } }
 }
 
 export function saveModel(data) {
@@ -49,6 +51,15 @@ export function AppProvider({ children }) {
   const [wallet, setWallet] = useState(() => loadWallet())
   const [model, setModel]   = useState(() => loadModel())
   const [modelOk, setModelOkState] = useState(() => localStorage.getItem(MODEL_OK_KEY) === '1')
+  const [referral, setReferralState] = useState(() => {
+    try { return localStorage.getItem(REFERRAL_KEY) || '' } catch { return '' }
+  })
+
+  const setReferral = useCallback((id) => {
+    setReferralState(id)
+    if (id) localStorage.setItem(REFERRAL_KEY, id)
+    else localStorage.removeItem(REFERRAL_KEY)
+  }, [])
 
   const setModelOk = useCallback((v) => {
     setModelOkState(v)
@@ -71,11 +82,28 @@ export function AppProvider({ children }) {
     setWallet(null)
   }, [])
 
+  // Computed effective URLs based on IS_TESTNET constant
+  const rpcUrl = useMemo(() =>
+    IS_TESTNET
+      ? (model.testnetRpcUrl || DEFAULT_TESTNET_RPC)
+      : (model.rpcUrl || DEFAULT_RPC),
+    [model.testnetRpcUrl, model.rpcUrl]
+  )
+
+  const relayUrl = useMemo(() =>
+    IS_TESTNET
+      ? (model.testnetRelayUrl || DEFAULT_TESTNET_RELAY)
+      : DEFAULT_RELAY,
+    [model.testnetRelayUrl]
+  )
+
   return (
     <AppContext.Provider value={{
       wallet, setWallet, clearWallet,
       model, updateModel,
       modelOk, setModelOk,
+      rpcUrl, relayUrl,
+      referral, setReferral,
     }}>
       {children}
     </AppContext.Provider>
