@@ -4,7 +4,7 @@ import bs58 from 'bs58'
 import { useApp, DEFAULT_RPC, DEFAULT_TESTNET_RPC, DEFAULT_TESTNET_RELAY, genAgentId } from '../store.jsx'
 import { IS_TESTNET } from '../constants.js'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
-import { registerAgent, checkAgentRegistered } from '../quest.js'
+import { registerAgent, checkAgentRegistered, getAgentPoints } from '../quest.js'
 import './Settings.css'
 
 function Toast({ msg, type, onClose }) {
@@ -33,6 +33,7 @@ export default function Settings() {
   const [testnetDirty, setTestnetDirty] = useState(false)
   const [agentInput, setAgentInput] = useState(model.agentId || '')
   const [agentRegistered, setAgentRegistered] = useState(!!model.agentRegistered)
+  const [agentPoints, setAgentPoints] = useState(null)
   const [registering, setRegistering] = useState(false)
   const [testing, setTesting]       = useState(false)
   const [testResult, setTestResult] = useState(null)
@@ -108,6 +109,7 @@ export default function Settings() {
       await registerAgent(conn, walletKp, id)
       updateModel({ ...model, agentId: id, agentRegistered: true })
       setAgentRegistered(true)
+      setAgentPoints(0)
       notify(t('settings.registerSuccess'))
     } catch (e) {
       console.error('Register agent error:', e)
@@ -123,16 +125,21 @@ export default function Settings() {
     setAgentInput(id)
   }, [agentRegistered])
 
-  // Check if agent is already registered on-chain on mount
+  // Check if agent is already registered on-chain on mount + fetch points
   useEffect(() => {
-    if (model.agentRegistered || !model.agentId) return
+    if (!model.agentId) return
     const conn = new Connection(rpcUrl, 'confirmed')
-    checkAgentRegistered(conn, model.agentId).then(registered => {
-      if (registered) {
-        updateModel({ ...model, agentRegistered: true })
-        setAgentRegistered(true)
-      }
-    }).catch(() => {})
+    if (!model.agentRegistered) {
+      checkAgentRegistered(conn, model.agentId).then(registered => {
+        if (registered) {
+          updateModel({ ...model, agentRegistered: true })
+          setAgentRegistered(true)
+          getAgentPoints(conn, model.agentId).then(setAgentPoints)
+        }
+      }).catch(() => {})
+    } else {
+      getAgentPoints(conn, model.agentId).then(setAgentPoints)
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSaveTestnet = useCallback(() => {
@@ -242,9 +249,17 @@ export default function Settings() {
               onChange={e => { if (!agentRegistered) setAgentInput(e.target.value) }}
               readOnly={agentRegistered}
               placeholder="CYBER-WOLF-1234" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', opacity: agentRegistered ? 0.7 : 1 }} />
-            {!agentRegistered && (
+            {!agentRegistered ? (
               <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={handleRegenAgent}>
                 {t('settings.regenerate')}
+              </button>
+            ) : (
+              <button className="btn btn-ghost" style={{ flexShrink: 0 }} onClick={() => {
+                const encoded = bs58.encode(new TextEncoder().encode(agentInput))
+                const url = `${window.location.origin}/?referral=${encoded}`
+                navigator.clipboard.writeText(url).then(() => notify(t('settings.referralCopied')))
+              }}>
+                {t('settings.share')}
               </button>
             )}
           </div>
@@ -261,8 +276,14 @@ export default function Settings() {
           </div>
         )}
         {agentRegistered && (
-          <div className="settings-registered-badge">
-            <span>✓</span> {t('settings.registered')}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="settings-registered-badge">
+              <span>✓</span> {t('settings.registered')}
+            </div>
+            <div className="settings-agent-points">
+              <span className="settings-agent-points-value">{agentPoints ?? '—'}</span>
+              <span className="settings-agent-points-label">{t('settings.points')}</span>
+            </div>
           </div>
         )}
       </div>

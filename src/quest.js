@@ -421,3 +421,23 @@ export async function checkAgentRegistered(connection, agentId) {
     return false
   }
 }
+
+/**
+ * Fetch agent points from on-chain record (raw account data parsing).
+ * Layout (after 8-byte discriminator):
+ *   32 authority | 32 pending_buffer | 32 memory |
+ *   8 created_at | 8 updated_at | 8 points | ...
+ */
+export async function getAgentPoints(connection, agentId) {
+  try {
+    const agentPda = getAgentPda(agentId)
+    const info = await connection.getAccountInfo(agentPda)
+    if (!info) return 0
+    const buf = Buffer.from(info.data)
+    // offset: 8 discriminator + 32 + 32 + 32 + 8 + 8 = 120
+    const points = Number(buf.readBigUInt64LE(120))
+    return points
+  } catch {
+    return 0
+  }
+}

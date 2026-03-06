@@ -218,6 +218,26 @@
   border-radius: var(--radius);
 }
 
+.settings-agent-points {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.settings-agent-points-value {
+  font-family: var(--font-heading);
+  font-size: 24px;
+  color: var(--amber);
+  line-height: 1;
+}
+
+.settings-agent-points-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 /* Private key display (reused from wallet) */
 .wallet-secret-key {
   display: block;
