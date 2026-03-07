@@ -7,3 +7,9 @@ dist
 .playwright-mcp
 bun.lock
 docs
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
