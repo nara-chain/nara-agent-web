@@ -18,6 +18,8 @@ class NodeWallet {
 const QUEST_PROGRAM_ID = 'Quest11111111111111111111111111111111111111'
 const AGENT_REGISTRY_PROGRAM_ID = 'AgentRegistry111111111111111111111111111111'
 const DEFAULT_RELAY_URL = 'https://quest-api.nara.build'
+const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')
+const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb')
 
 // ── ZK constants ────────────────────────────────────────────────
 const BN254_FIELD = 21888242871839275222246405745257275088696311157297823662689037894645226208583n
@@ -102,10 +104,10 @@ function parsePoolAccount(program, data) {
   const now = Math.floor(Date.now() / 1000)
   const deadline = pool.deadline.toNumber()
   const secsLeft = deadline - now
+  const active = pool.question.length > 0 && secsLeft > 0
   return {
-    active: pool.isActive,
+    active,
     round: pool.round.toString(),
-    questionId: pool.questionId.toString(),
     question: pool.question,
     answerHash: Array.from(pool.answerHash),
     rewardPerWinner: pool.rewardPerWinner.toNumber() / LAMPORTS_PER_SOL,
@@ -124,10 +126,10 @@ function parseWinnerRecord(program, data, currentRound) {
   try {
     const wr = program.coder.accounts.decode('winnerRecord', data)
     if (wr.round.toString() === currentRound) {
-      return { answered: true, rewarded: wr.rewarded }
+      return { answered: true }
     }
   } catch { /* account doesn't exist or decode fails */ }
-  return { answered: false, rewarded: false }
+  return { answered: false }
 }
 
 /**
@@ -149,7 +151,7 @@ export async function fetchQuestAndStatus(connection, userPubkey) {
   // Skip 8-byte discriminator is handled by Anchor coder
   const quest = parsePoolAccount(program, accounts[0].data)
 
-  let roundStatus = { answered: false, rewarded: false }
+  let roundStatus = { answered: false }
   if (userPubkey && accounts[1]?.data) {
     roundStatus = parseWinnerRecord(program, accounts[1].data, quest.round)
   }
@@ -179,7 +181,7 @@ export async function getBalance(connection, pubkey) {
 /**
  * Generate ZK proof for a quest answer (browser-compatible, uses URL for circuit files)
  */
-export async function generateProof(answer, answerHash, userPubkey) {
+export async function generateProof(answer, answerHash, userPubkey, round) {
   const snarkjs = await import('snarkjs')
   const answerHashFieldStr = hashBytesToFieldStr(answerHash)
   const { lo, hi } = pubkeyToCircuitInputs(userPubkey)
@@ -193,6 +195,7 @@ export async function generateProof(answer, answerHash, userPubkey) {
       answer_hash: answerHashFieldStr,
       pubkey_lo: lo,
       pubkey_hi: hi,
+      round: round,
     },
     wasmUrl,
     zkeyUrl,
@@ -207,7 +210,7 @@ export async function generateProof(answer, answerHash, userPubkey) {
 /**
  * Submit answer via relay (gasless) — for wallets with no balance
  */
-export async function submitAnswerViaRelay(relayUrl, userPubkey, proofHex, agent = '', model = '', activityLog = null) {
+export async function submitAnswerViaRelay(relayUrl, userPubkey, proofHex, agent = '', model = '') {
   const base = relayUrl.replace(/\/+$/, '')
   const body = {
     user: userPubkey.toBase58(),
@@ -216,9 +219,6 @@ export async function submitAnswerViaRelay(relayUrl, userPubkey, proofHex, agent
     proofC: proofHex.proofC,
     agent,
     model,
-  }
-  if (activityLog) {
-    body.activityLog = activityLog
   }
   const res = await fetch(`${base}/submit-answer`, {
     method: 'POST',
@@ -312,7 +312,6 @@ export async function parseQuestReward(connection, txSignature, retries = 10) {
   }
 
   return {
-    rewarded: rewardLamports > 0,
     rewardLamports,
     rewardNso: rewardLamports / LAMPORTS_PER_SOL,
     winner,
@@ -324,19 +323,26 @@ export async function parseQuestReward(connection, txSignature, retries = 10) {
 /**
  * Build a logActivity instruction (browser-compatible).
  * Used to append to submit-answer transactions for registered agents.
+ * @param referralAgentId - Optional referral agent ID for earning referral points.
  */
 export async function makeLogActivityIx(connection, authority, agentId, model, activity, log, referralAgentId) {
   const program = createRegistryProgram(connection, Keypair.generate())
-  const accounts = {
-    authority,
-    instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
-    referralAgent: referralAgentId
-      ? getAgentPda(referralAgentId)
-      : null,
+  const pointMint = getPointMintPda()
+  const authorityPointAccount = getAssociatedTokenAddress(pointMint, authority)
+
+  let referralAccounts = { referralAgent: null, referralAuthority: null, referralPointAccount: null }
+  if (referralAgentId) {
+    referralAccounts = await resolveReferralAccounts(connection, referralAgentId)
   }
+
   return program.methods
     .logActivity(agentId, model, activity, log)
-    .accounts(accounts)
+    .accounts({
+      authority,
+      authorityPointAccount,
+      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
+      ...referralAccounts,
+    })
     .instruction()
 }
 
@@ -368,6 +374,31 @@ function getAgentPda(agentId) {
   return pda
 }
 
+function getPointMintPda() {
+  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
+  const [pda] = PublicKey.findProgramAddressSync([Buffer.from('point_mint')], pid)
+  return pda
+}
+
+function getAssociatedTokenAddress(mint, owner) {
+  const [ata] = PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), TOKEN_2022_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  )
+  return ata
+}
+
+async function resolveReferralAccounts(connection, referralAgentId) {
+  const pointMint = getPointMintPda()
+  const referralAgent = getAgentPda(referralAgentId)
+  const accountInfo = await connection.getAccountInfo(referralAgent)
+  if (!accountInfo) throw new Error(`Referral agent "${referralAgentId}" not found`)
+  // Authority is first 32 bytes after 8-byte discriminator
+  const referralAuthority = new PublicKey(accountInfo.data.subarray(8, 40))
+  const referralPointAccount = getAssociatedTokenAddress(pointMint, referralAuthority)
+  return { referralAgent, referralAuthority, referralPointAccount }
+}
+
 /**
  * Fetch agent registry program config (register fee, points config, etc.)
  */
@@ -380,10 +411,14 @@ export async function getRegistryConfig(connection) {
     let offset = 8 // skip discriminator
     const admin = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
     const feeRecipient = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
+    const pointMint = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
     const registerFee = Number(buf.readBigUInt64LE(offset)); offset += 8
     const pointsSelf = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const pointsReferral = Number(buf.readBigUInt64LE(offset))
-    return { admin, feeRecipient, registerFee, pointsSelf, pointsReferral }
+    const pointsReferral = Number(buf.readBigUInt64LE(offset)); offset += 8
+    const referralRegisterFee = Number(buf.readBigUInt64LE(offset)); offset += 8
+    const referralFeeShare = Number(buf.readBigUInt64LE(offset)); offset += 8
+    const referralRegisterPoints = Number(buf.readBigUInt64LE(offset))
+    return { admin, feeRecipient, pointMint, registerFee, pointsSelf, pointsReferral, referralRegisterFee, referralFeeShare, referralRegisterPoints }
   } catch (e) {
     throw new Error(`Failed to fetch registry config: ${e.message}`)
   }
@@ -391,20 +426,26 @@ export async function getRegistryConfig(connection) {
 
 /**
  * Register an agent on-chain (browser-compatible, no WebSocket)
+ * @param referralAgentId - Optional referral agent ID. If provided and valid, registers with referral.
  */
-export async function registerAgent(connection, walletKeypair, agentId) {
+export async function registerAgent(connection, walletKeypair, agentId, referralAgentId) {
   if (/[A-Z]/.test(agentId)) {
     throw new Error('Agent ID must be lowercase')
   }
   const program = createRegistryProgram(connection, walletKeypair)
-  const configPda = getConfigPda()
-  const config = await program.account.programConfig.fetch(configPda)
+  const config = await getRegistryConfig(connection)
+
+  let referralAccounts = { referralAgent: null, referralAuthority: null, referralPointAccount: null }
+  if (referralAgentId) {
+    referralAccounts = await resolveReferralAccounts(connection, referralAgentId)
+  }
 
   const tx = await program.methods
     .registerAgent(agentId)
     .accounts({
       authority: walletKeypair.publicKey,
       feeRecipient: config.feeRecipient,
+      ...referralAccounts,
     })
     .signers([walletKeypair])
     .transaction()
@@ -447,20 +488,46 @@ export async function checkAgentRegistered(connection, agentId) {
 }
 
 /**
- * Fetch agent points from on-chain record (raw account data parsing).
+ * Fetch agent's on-chain referral ID from the AgentRecord.
  * Layout (after 8-byte discriminator):
  *   32 authority | 32 pending_buffer | 32 memory |
- *   8 created_at | 8 updated_at | 8 points | ...
+ *   8 created_at | 8 updated_at |
+ *   4 version | 4 agent_id_len | 32 agent_id |
+ *   4 referral_id_len | 32 referral_id
+ */
+export async function getAgentReferral(connection, agentId) {
+  try {
+    const agentPda = getAgentPda(agentId)
+    const info = await connection.getAccountInfo(agentPda)
+    if (!info) return null
+    const buf = Buffer.from(info.data)
+    // offset: 8 + 32 + 32 + 32 + 8 + 8 + 4 + 4 + 32 = 160
+    const referralIdLen = buf.readUInt32LE(160)
+    if (referralIdLen === 0) return null
+    return buf.subarray(164, 164 + referralIdLen).toString('utf-8')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Fetch agent points from SPL Token-2022 account balance.
+ * Points are now minted as tokens to the agent authority's ATA.
  */
 export async function getAgentPoints(connection, agentId) {
   try {
     const agentPda = getAgentPda(agentId)
     const info = await connection.getAccountInfo(agentPda)
     if (!info) return 0
-    const buf = Buffer.from(info.data)
-    // offset: 8 discriminator + 32 + 32 + 32 + 8 + 8 = 120
-    const points = Number(buf.readBigUInt64LE(120))
-    return points
+    // Authority is first 32 bytes after 8-byte discriminator
+    const authority = new PublicKey(info.data.subarray(8, 40))
+    const pointMint = getPointMintPda()
+    const ata = getAssociatedTokenAddress(pointMint, authority)
+    const ataInfo = await connection.getAccountInfo(ata)
+    if (!ataInfo) return 0
+    // Token-2022 account: amount is at offset 64 (after mint 32 + owner 32), u64 LE
+    const amount = Number(Buffer.from(ataInfo.data).readBigUInt64LE(64))
+    return amount
   } catch {
     return 0
   }

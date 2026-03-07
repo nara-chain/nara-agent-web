@@ -26,8 +26,9 @@ export default function Settings() {
     apiKey:    model.apiKey    || '',
   })
   const [agentInput, setAgentInput] = useState(model.agentId || '')
-  const [agentRegistered, setAgentRegistered] = useState(!!model.agentRegistered)
+  const [agentRegistered, setAgentRegistered] = useState(false)
   const [agentPoints, setAgentPoints] = useState(null)
+  const [registerFee, setRegisterFee] = useState(null) // { fee, hasReferral }
   const [registering, setRegistering] = useState(false)
   const [testing, setTesting]       = useState(false)
   const [testResult, setTestResult] = useState(null)
@@ -95,19 +96,22 @@ export default function Settings() {
       const walletKp = Keypair.fromSecretKey(bs58.decode(wallet.secretKey))
 
       // Check balance against on-chain register fee
-      const [balance, config] = await Promise.all([
-        conn.getBalance(walletKp.publicKey),
-        getRegistryConfig(conn),
-      ])
-      if (balance < config.registerFee + 10_000) {
-        notify(`${t('settings.insufficientBalance')} (${(config.registerFee / 1e9).toFixed(4)} NARA)`, 'err')
+      const balance = await conn.getBalance(walletKp.publicKey)
+      const fee = registerFee?.fee ?? 0
+      if (balance < fee + 10_000) {
+        notify(`${t('settings.insufficientBalance')} (${parseFloat((fee / 1e9).toFixed(9))} NARA)`, 'err')
         return
       }
 
-      await registerAgent(conn, walletKp, id)
-      updateModel({ ...model, agentId: id, agentRegistered: true })
+      // Use referral if valid, otherwise register without it
+      const validReferral = registerFee?.hasReferral ? referral : null
+
+      await registerAgent(conn, walletKp, id, validReferral)
+      updateModel({ ...model, agentId: id })
       setAgentRegistered(true)
       setAgentPoints(0)
+      // Referral is now stored on-chain, clear saved referral
+      if (validReferral) setReferral('')
       notify(t('settings.registerSuccess'))
     } catch (e) {
       console.error('Register agent error:', e)
@@ -115,7 +119,7 @@ export default function Settings() {
     } finally {
       setRegistering(false)
     }
-  }, [agentInput, wallet, model, updateModel, notify, t, rpcUrl])
+  }, [agentInput, wallet, model, updateModel, notify, t, rpcUrl, referral, setReferral, registerFee])
 
   const handleRegenAgent = useCallback(() => {
     if (agentRegistered) return
@@ -123,21 +127,26 @@ export default function Settings() {
     setAgentInput(id)
   }, [agentRegistered])
 
-  // Check if agent is already registered on-chain on mount + fetch points
+  // Check agent registration + fetch config & referral validity on mount
   useEffect(() => {
-    if (!model.agentId) return
     const conn = new Connection(rpcUrl, 'confirmed')
-    if (!model.agentRegistered) {
-      checkAgentRegistered(conn, model.agentId).then(registered => {
-        if (registered) {
-          updateModel({ ...model, agentRegistered: true })
-          setAgentRegistered(true)
-          getAgentPoints(conn, model.agentId).then(setAgentPoints)
-        }
-      }).catch(() => {})
-    } else {
-      getAgentPoints(conn, model.agentId).then(setAgentPoints)
-    }
+    // Fetch register fee & check referral validity
+    getRegistryConfig(conn).then(async config => {
+      let hasReferral = false
+      if (referral) {
+        try { hasReferral = await checkAgentRegistered(conn, referral) } catch {}
+      }
+      const fee = hasReferral ? config.referralRegisterFee : config.registerFee
+      setRegisterFee({ fee, hasReferral })
+    }).catch(() => {})
+    // Check if agent is already registered
+    if (!model.agentId) return
+    checkAgentRegistered(conn, model.agentId).then(registered => {
+      if (registered) {
+        setAgentRegistered(true)
+        getAgentPoints(conn, model.agentId).then(setAgentPoints)
+      }
+    }).catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clear data flow
@@ -156,8 +165,6 @@ export default function Settings() {
   const handleClearConfirm = useCallback(() => {
     if (clearModal === 'confirm-wallet') {
       clearWallet()
-      // Also clear agent registration status
-      updateModel({ ...model, agentRegistered: false })
       setAgentRegistered(false)
       setAgentPoints(null)
       notify(t('settings.walletCleared'))
@@ -230,7 +237,12 @@ export default function Settings() {
             )}
           </div>
           <span className="settings-hint">
-            {agentRegistered ? t('settings.agentRegistered') : t('settings.agentIdHint')}
+            {agentRegistered
+              ? t('settings.agentRegistered')
+              : registerFee
+                ? `${t('settings.agentIdHint')} · ${t('settings.registerCost')} ${parseFloat((registerFee.fee / 1e9).toFixed(9))} NARA${registerFee.hasReferral ? ` (${t('settings.referralDiscount')})` : ''}`
+                : t('settings.agentIdHint')
+            }
           </span>
         </div>
       </div>

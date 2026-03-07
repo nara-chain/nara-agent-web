@@ -11,6 +11,8 @@ import {
   submitAnswerViaRelay,
   submitAnswerDirect,
   parseQuestReward,
+  checkAgentRegistered,
+  getAgentReferral,
 } from '../quest.js'
 import './PoMI.css'
 
@@ -47,7 +49,7 @@ function DifficultyBar({ level, t }) {
 
 export default function PoMI() {
   const navigate = useNavigate()
-  const { wallet, model, modelOk, setModelOk, rpcUrl, relayUrl, referral } = useApp()
+  const { wallet, model, modelOk, setModelOk, rpcUrl, relayUrl } = useApp()
   const { t } = useI18n()
 
   // Quest state
@@ -65,6 +67,12 @@ export default function PoMI() {
   const [result, setResult] = useState(null)
   const [showModal, setShowModal] = useState(null)
 
+  // Agent registration status & referral (queried from chain)
+  const [agentRegistered, setAgentRegistered] = useState(false)
+  const [agentReferral, setAgentReferral] = useState(null)
+  const agentRegisteredRef = useRef(false)
+  const agentReferralRef = useRef(null)
+
   // Auto-mining
   const [mining, setMining] = useState(false)
   const miningRef = useRef(false)
@@ -72,8 +80,22 @@ export default function PoMI() {
   const timerRef = useRef(null)
   const pollRef = useRef(null)
 
-  // Keep miningRef in sync
+  // Keep refs in sync
   useEffect(() => { miningRef.current = mining }, [mining])
+  useEffect(() => { agentRegisteredRef.current = agentRegistered }, [agentRegistered])
+  useEffect(() => { agentReferralRef.current = agentReferral }, [agentReferral])
+
+  // Check agent registration + fetch on-chain referral on mount
+  useEffect(() => {
+    if (!model.agentId) return
+    const conn = new Connection(rpcUrl, 'confirmed')
+    checkAgentRegistered(conn, model.agentId).then(registered => {
+      setAgentRegistered(registered)
+      if (registered) {
+        getAgentReferral(conn, model.agentId).then(setAgentReferral).catch(() => {})
+      }
+    }).catch(() => {})
+  }, [model.agentId, rpcUrl])
 
   // ── Fetch quest + answer status in one RPC call ────────────
   const fetchQuest = useCallback(async () => {
@@ -86,7 +108,7 @@ export default function PoMI() {
       setQuest(info)
       setTimeLeft(Math.max(0, info.timeRemaining))
       // Restore saved reward amount if same round
-      if (rs.answered && rs.rewarded) {
+      if (rs.answered) {
         const saved = loadRoundReward(info.round)
         if (saved != null) rs.rewardNso = saved
       }
@@ -201,12 +223,12 @@ export default function PoMI() {
       setStatus(t('pomi.generatingProof'))
       let proof
       try {
-        proof = await generateProof(aiAnswer, currentQuest.answerHash, walletKp.publicKey)
+        proof = await generateProof(aiAnswer, currentQuest.answerHash, walletKp.publicKey, currentQuest.round)
       } catch (e) {
         console.error('Proof failed:', e)
         setPhase('result')
-        setRoundStatus({ answered: false, rewarded: false })
-        setResult({ rewarded: false, error: t('pomi.proofFailed'), aiAnswer })
+        setRoundStatus({ answered: false })
+        setResult({ rewardNso: 0, error: t('pomi.proofFailed'), aiAnswer })
         return // Don't retry, wait for next round
       }
 
@@ -217,15 +239,15 @@ export default function PoMI() {
       const modelId = model.model || ''
 
       // Build activityLog if agent is registered
-      const answerHash = Array.from(
+      const answerHashHex = Array.from(
         new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(aiAnswer)))
       ).map(b => b.toString(16).padStart(2, '0')).join('')
-      const activityLog = model.agentRegistered ? {
+      const activityLog = agentRegisteredRef.current ? {
         agentId,
         model: modelId,
         activity: 'PoMI',
-        log: answerHash,
-        referralAgentId: referral || undefined,
+        log: answerHashHex,
+        referralAgentId: agentReferralRef.current || undefined,
       } : null
 
       let txHash
@@ -236,7 +258,7 @@ export default function PoMI() {
         txHash = signature
       } else {
         setStatus(t('pomi.submittingRelay'))
-        const { txHash: hash } = await submitAnswerViaRelay(relayUrl, walletKp.publicKey, proof.hex, agentId, modelId, activityLog)
+        const { txHash: hash } = await submitAnswerViaRelay(relayUrl, walletKp.publicKey, proof.hex, agentId, modelId)
         txHash = hash
       }
 
@@ -246,16 +268,15 @@ export default function PoMI() {
       try {
         reward = await parseQuestReward(conn, txHash)
       } catch {
-        reward = { rewarded: false, rewardNso: 0, winner: '' }
+        reward = { rewardNso: 0, winner: '' }
       }
 
       setPhase('result')
-      const rNso = reward.rewarded ? reward.rewardNso : 0
-      setRoundStatus({ answered: true, rewarded: reward.rewarded, rewardNso: rNso })
-      if (reward.rewarded && questRef.current) saveRoundReward(questRef.current.round, rNso)
+      const rNso = reward.rewardNso || 0
+      setRoundStatus({ answered: true, rewardNso: rNso })
+      if (rNso > 0 && questRef.current) saveRoundReward(questRef.current.round, rNso)
       setResult({
-        rewarded: reward.rewarded,
-        rewardNso: reward.rewardNso,
+        rewardNso: rNso,
         winner: reward.winner,
         txHash,
         method: balance > 10_000_000 ? 'direct' : 'relay',
@@ -272,8 +293,8 @@ export default function PoMI() {
         ? t('pomi.alreadyAnswered')
         : e.message?.includes('not confirmed') ? t('pomi.submitFailed')
         : e.message || t('pomi.submitFailed')
-      if (isAlreadyAnswered) setRoundStatus({ answered: true, rewarded: false })
-      setResult({ rewarded: false, error: msg, txHash: errTx })
+      if (isAlreadyAnswered) setRoundStatus({ answered: true })
+      setResult({ rewardNso: 0, error: msg, txHash: errTx })
       // Don't retry, wait for next round
     }
   }, [wallet, model, rpcUrl, relayUrl, t, setModelOk])
@@ -374,9 +395,9 @@ export default function PoMI() {
         </span>
         {roundStatus && (
           roundStatus.answered
-            ? <span className={`badge ${roundStatus.rewarded ? 'badge-ok' : 'badge-warn'}`}>
-                {t('pomi.roundAnswered')}{roundStatus.rewarded
-                  ? ` · ${roundStatus.rewardNso ? `+${roundStatus.rewardNso.toFixed(2)} NARA` : t('pomi.roundRewarded')}`
+            ? <span className={`badge ${roundStatus.rewardNso > 0 ? 'badge-ok' : 'badge-warn'}`}>
+                {t('pomi.roundAnswered')}{roundStatus.rewardNso > 0
+                  ? ` · +${roundStatus.rewardNso.toFixed(2)} NARA`
                   : ` · ${t('pomi.roundNotRewarded')}`}
               </span>
             : <span className="badge badge-off">{t('pomi.roundNotAnswered')}</span>
@@ -450,8 +471,8 @@ export default function PoMI() {
 
             {/* Result */}
             {(phase === 'result' || phase === 'waiting') && result && (
-              <div className={`pomi-result ${result.rewarded ? 'pomi-result-ok' : 'pomi-result-err'}`}>
-                {result.rewarded ? (
+              <div className={`pomi-result ${result.rewardNso > 0 ? 'pomi-result-ok' : 'pomi-result-err'}`}>
+                {result.rewardNso > 0 ? (
                   <>
                     <span className="pomi-result-icon">✓</span>
                     <div>
