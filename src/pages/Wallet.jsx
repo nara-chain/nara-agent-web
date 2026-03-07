@@ -5,6 +5,11 @@ import { derivePath } from 'ed25519-hd-key'
 import bs58 from 'bs58'
 import { useApp } from '../store.jsx'
 import { useI18n } from '../i18n.jsx'
+import {
+  ZKID_DENOMINATIONS, getZkIdInfo, getZkIdConfig, createZkId,
+  deposit as zkDeposit, scanClaimableDeposits, withdraw as zkWithdraw,
+  deriveIdSecret, generateValidRecipient,
+} from '../zkid.js'
 import './Wallet.css'
 
 function keypairToStore(kp) {
@@ -37,11 +42,31 @@ export default function Wallet() {
   const [amount, setAmount]         = useState('')
   const [sending, setSending]       = useState(false)
   const [showTransfer, setShowTransfer] = useState(false)
+  const [transferTab, setTransferTab] = useState('normal') // 'normal' | 'private'
   const [txResult, setTxResult]     = useState(null) // { ok, sig, error }
   const [confirmSend, setConfirmSend] = useState(false)
+  const [confirmZkSend, setConfirmZkSend] = useState(false)
   const [newMnemonic, setNewMnemonic]   = useState('')
 
+  // ZK ID (private transfer) state
+  const [zkName, setZkName]             = useState('')
+  const [zkDenom, setZkDenom]           = useState(ZKID_DENOMINATIONS[0].value)
+  const [zkDepositing, setZkDepositing] = useState(false)
+  const [zkResult, setZkResult]         = useState(null) // { ok, sig, error }
+  // My ZK ID
+  const [myZkName, setMyZkName]           = useState(() => localStorage.getItem('nara_zkid_name') || '')
+  const [myZkInfo, setMyZkInfo]           = useState(null) // null = unchecked
+  const [zkRegistering, setZkRegistering] = useState(false)
+  const [zkDeposits, setZkDeposits]       = useState(null) // null | array
+  const [zkScanning, setZkScanning]       = useState(false)
+  const [zkWithdrawing, setZkWithdrawing] = useState(null) // index being withdrawn
+
   const notify = useCallback((msg, type = 'ok') => setToast({ msg, type }), [])
+
+  const clearTransferInputs = useCallback(() => {
+    setToAddr(''); setAmount(''); setTxResult(null); setConfirmSend(false)
+    setZkName(''); setZkDenom(ZKID_DENOMINATIONS[0].value); setZkResult(null); setConfirmZkSend(false)
+  }, [])
 
   const fetchBalance = useCallback(async () => {
     if (!wallet) return
@@ -86,6 +111,100 @@ export default function Wallet() {
       notify(t('wallet.imported'))
     } catch { notify(t('wallet.invalidKey'), 'err') }
   }, [inputVal, importMode, setWallet, notify, t])
+
+  // ── ZK ID handlers ──────────────────────────────────────────
+  const handleZkDeposit = useCallback(async () => {
+    setConfirmZkSend(false)
+    if (!zkName.trim()) return
+    setZkDepositing(true); setZkResult(null)
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const kp = storeToKeypair(wallet)
+      // Verify recipient ZK ID exists
+      const info = await getZkIdInfo(conn, zkName.trim())
+      if (!info) { notify('ZK ID not found', 'err'); setZkDepositing(false); return }
+      const sig = await zkDeposit(conn, kp, zkName.trim(), zkDenom)
+      setZkResult({ ok: true, sig })
+      fetchBalance()
+    } catch (e) {
+      setZkResult({ ok: false, error: e.message || t('wallet.depositFailed') })
+    } finally { setZkDepositing(false) }
+  }, [zkName, zkDenom, wallet, rpcUrl, fetchBalance, notify, t])
+
+  const handleCheckMyZkId = useCallback(async () => {
+    if (!myZkName.trim()) return
+    localStorage.setItem('nara_zkid_name', myZkName.trim())
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const info = await getZkIdInfo(conn, myZkName.trim())
+      setMyZkInfo(info)
+    } catch { setMyZkInfo(null) }
+  }, [myZkName, rpcUrl])
+
+  useEffect(() => { if (myZkName && showTransfer && transferTab === 'private') handleCheckMyZkId() }, [showTransfer, transferTab])
+
+  const handleZkRegister = useCallback(async () => {
+    if (!myZkName.trim()) return
+    setZkRegistering(true)
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const kp = storeToKeypair(wallet)
+      const secret = await deriveIdSecret(kp, myZkName.trim())
+      await createZkId(conn, kp, myZkName.trim(), secret)
+      notify(t('wallet.zkidRegisterOk'))
+      localStorage.setItem('nara_zkid_name', myZkName.trim())
+      handleCheckMyZkId()
+    } catch (e) { notify(e.message || 'Registration failed', 'err') }
+    finally { setZkRegistering(false) }
+  }, [myZkName, wallet, rpcUrl, notify, t, handleCheckMyZkId])
+
+  const handleScanDeposits = useCallback(async () => {
+    if (!myZkName.trim() || !myZkInfo) return
+    setZkScanning(true); setZkDeposits(null)
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const kp = storeToKeypair(wallet)
+      const secret = await deriveIdSecret(kp, myZkName.trim())
+      const deposits = await scanClaimableDeposits(conn, myZkName.trim(), secret)
+      setZkDeposits(deposits)
+    } catch (e) { notify(e.message, 'err') }
+    finally { setZkScanning(false) }
+  }, [myZkName, myZkInfo, wallet, rpcUrl, notify])
+
+  const handleWithdraw = useCallback(async (idx) => {
+    const dep = zkDeposits[idx]
+    setZkWithdrawing(idx)
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const kp = storeToKeypair(wallet)
+      const secret = await deriveIdSecret(kp, myZkName.trim())
+
+      // Withdraw to a temporary BN254-compatible address, then sweep back — all in one TX
+      const tempKp = generateValidRecipient()
+      const withdrawIx = await zkWithdraw(conn, kp, myZkName.trim(), secret, dep, tempKp.publicKey)
+
+      const denomLamports = Number(dep.denomination)
+      const sweepIx = SystemProgram.transfer({
+        fromPubkey: tempKp.publicKey, toPubkey: kp.publicKey, lamports: denomLamports,
+      })
+
+      const tx = new Transaction().add(withdrawIx, sweepIx)
+      tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
+      tx.feePayer = kp.publicKey
+      tx.sign(kp, tempKp)
+      await conn.sendRawTransaction(tx.serialize())
+
+      notify(t('wallet.zkidWithdrawOk'))
+      setZkDeposits(prev => prev.filter((_, i) => i !== idx))
+      fetchBalance()
+    } catch (e) { notify(e.message || t('wallet.zkidWithdrawFailed'), 'err') }
+    finally { setZkWithdrawing(null) }
+  }, [zkDeposits, myZkName, wallet, rpcUrl, notify, t, fetchBalance])
+
+  const handleZkDepositClick = useCallback(() => {
+    if (!zkName.trim()) { notify(t('wallet.fillFields'), 'err'); return }
+    setConfirmZkSend(true)
+  }, [zkName, notify, t])
 
   const handleSendClick = useCallback(() => {
     if (!toAddr || !amount) { notify(t('wallet.fillFields'), 'err'); return }
@@ -210,7 +329,7 @@ export default function Wallet() {
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={fetchBalance}>{t('wallet.refresh')}</button>
-            <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => setShowTransfer(v => !v)}>
+            <button className="btn btn-primary" style={{ fontSize: 11 }} onClick={() => { clearTransferInputs(); setShowTransfer(v => !v) }}>
               {showTransfer ? t('common.cancel') : t('wallet.transfer')}
             </button>
           </div>
@@ -227,34 +346,140 @@ export default function Wallet() {
 
       {showTransfer && (
         <div className="card" style={{ marginBottom: 16 }}>
-          <div className="card-title">{t('wallet.sendNara')}</div>
-          <div className="input-group" style={{ marginBottom: 10 }}>
-            <label className="input-label">{t('wallet.recipient')}</label>
-            <input className="input" placeholder="Nara address" value={toAddr} onChange={e => { setToAddr(e.target.value); setTxResult(null) }} />
+          {/* Transfer type tabs */}
+          <div className="import-tabs" style={{ marginBottom: 16 }}>
+            <button className={`import-tab ${transferTab === 'normal' ? 'active' : ''}`}
+              onClick={() => { clearTransferInputs(); setTransferTab('normal') }}>{t('wallet.normalTransfer')}</button>
+            <button className={`import-tab ${transferTab === 'private' ? 'active' : ''}`}
+              onClick={() => { clearTransferInputs(); setTransferTab('private') }}>{t('wallet.privateTransfer')}</button>
           </div>
-          <div className="input-group" style={{ marginBottom: 10 }}>
-            <label className="input-label">{t('wallet.amount')}</label>
-            <input className="input" type="number" min="0" step="0.001" placeholder="0.001" value={amount} onChange={e => { setAmount(e.target.value); setTxResult(null) }} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="btn btn-primary" onClick={handleSendClick} disabled={sending}>
-              {sending ? <><div className="spinner" />{t('wallet.sending')}</> : t('wallet.send')}
-            </button>
-          </div>
-          {txResult && (
-            <div className={`wallet-tx-result ${txResult.ok ? 'wallet-tx-ok' : 'wallet-tx-err'}`}>
-              <span className="wallet-tx-icon">{txResult.ok ? '✓' : '✗'}</span>
-              <div className="wallet-tx-body">
-                <div>{txResult.ok ? t('wallet.sent') : txResult.error}</div>
-                {txResult.sig && (
-                  <a className="wallet-tx-link" href={`https://explorer.nara.build/tx/${txResult.sig}`}
-                    target="_blank" rel="noopener noreferrer">
-                    TX {truncate(txResult.sig, 8, 8)} ↗
-                  </a>
-                )}
+
+          {transferTab === 'normal' && (<>
+            <div className="card-title">{t('wallet.sendNara')}</div>
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.recipient')}</label>
+              <input className="input" placeholder="Nara address" value={toAddr} onChange={e => { setToAddr(e.target.value); setTxResult(null) }} />
+            </div>
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.amount')}</label>
+              <input className="input" type="number" min="0" step="0.001" placeholder="0.001" value={amount} onChange={e => { setAmount(e.target.value); setTxResult(null) }} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-primary" onClick={handleSendClick} disabled={sending}>
+                {sending ? <><div className="spinner" />{t('wallet.sending')}</> : t('wallet.send')}
+              </button>
+            </div>
+            {txResult && (
+              <div className={`wallet-tx-result ${txResult.ok ? 'wallet-tx-ok' : 'wallet-tx-err'}`}>
+                <span className="wallet-tx-icon">{txResult.ok ? '✓' : '✗'}</span>
+                <div className="wallet-tx-body">
+                  <div>{txResult.ok ? t('wallet.sent') : txResult.error}</div>
+                  {txResult.sig && (
+                    <a className="wallet-tx-link" href={`https://explorer.nara.build/tx/${txResult.sig}`}
+                      target="_blank" rel="noopener noreferrer">
+                      TX {truncate(txResult.sig, 8, 8)} ↗
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+          </>)}
+
+          {transferTab === 'private' && (<>
+            {/* Private Send: deposit to someone's ZK ID */}
+            <div className="card-title">{t('wallet.privateDesc')}</div>
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.zkidName')}</label>
+              <input className="input" placeholder={t('wallet.zkidNamePlaceholder')}
+                value={zkName} onChange={e => { setZkName(e.target.value); setZkResult(null) }} />
+            </div>
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.denomination')}</label>
+              <div className="zk-denom-grid">
+                {ZKID_DENOMINATIONS.map(d => (
+                  <button key={d.label}
+                    className={`zk-denom-btn ${zkDenom === d.value ? 'active' : ''}`}
+                    onClick={() => setZkDenom(d.value)}>
+                    {d.label} NARA
+                  </button>
+                ))}
               </div>
             </div>
-          )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-primary" onClick={handleZkDepositClick} disabled={zkDepositing}>
+                {zkDepositing ? <><div className="spinner" />{t('wallet.depositing')}</> : t('wallet.depositSend')}
+              </button>
+            </div>
+            {zkResult && (
+              <div className={`wallet-tx-result ${zkResult.ok ? 'wallet-tx-ok' : 'wallet-tx-err'}`}>
+                <span className="wallet-tx-icon">{zkResult.ok ? '✓' : '✗'}</span>
+                <div className="wallet-tx-body">
+                  <div>{zkResult.ok ? t('wallet.depositSent') : zkResult.error}</div>
+                  {zkResult.sig && (
+                    <a className="wallet-tx-link" href={`https://explorer.nara.build/tx/${zkResult.sig}`}
+                      target="_blank" rel="noopener noreferrer">
+                      TX {truncate(zkResult.sig, 8, 8)} ↗
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* My ZK ID: register + scan + withdraw */}
+            <div className="zk-divider" />
+            <div className="card-title">{t('wallet.myZkid')}</div>
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.zkidNameInput')}</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input className="input" style={{ flex: 1 }} placeholder={t('wallet.zkidNameInputPlaceholder')}
+                  value={myZkName} onChange={e => setMyZkName(e.target.value)} />
+                <button className="btn btn-ghost" style={{ whiteSpace: 'nowrap' }} onClick={handleCheckMyZkId}>
+                  {myZkInfo ? t('wallet.zkidRegistered') : t('wallet.zkidNotRegistered')}
+                </button>
+              </div>
+            </div>
+
+            {!myZkInfo && myZkName.trim() && (
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                <button className="btn btn-primary" onClick={handleZkRegister} disabled={zkRegistering}>
+                  {zkRegistering ? <><div className="spinner" />{t('wallet.zkidRegistering')}</> : t('wallet.zkidRegister')}
+                </button>
+              </div>
+            )}
+
+            {myZkInfo && (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                  <button className="btn btn-ghost" onClick={handleScanDeposits} disabled={zkScanning}>
+                    {zkScanning ? <><div className="spinner" />{t('wallet.zkidScanning')}</> : t('wallet.zkidScanDeposits')}
+                  </button>
+                </div>
+                {zkDeposits !== null && (
+                  zkDeposits.length === 0 ? (
+                    <div className="zk-no-deposits">{t('wallet.zkidNoDeposits')}</div>
+                  ) : (
+                    <div className="zk-deposit-list">
+                      {zkDeposits.map((dep, idx) => {
+                        const nara = Number(dep.denomination) / 1e9
+                        return (
+                          <div key={idx} className="zk-deposit-item">
+                            <span className="zk-deposit-amount">{nara} NARA</span>
+                            <button className="btn btn-primary" style={{ padding: '4px 12px', fontSize: 12 }}
+                              onClick={() => handleWithdraw(idx)}
+                              disabled={zkWithdrawing !== null}>
+                              {zkWithdrawing === idx
+                                ? <><div className="spinner" />{t('wallet.zkidWithdrawing')}</>
+                                : t('wallet.zkidWithdraw')}
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                )}
+              </>
+            )}
+          </>)}
         </div>
       )}
 
@@ -270,6 +495,22 @@ export default function Wallet() {
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setConfirmSend(false)}>{t('common.cancel')}</button>
               <button className="btn btn-primary" onClick={handleSend}>{t('wallet.confirmSend')}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmZkSend && (
+        <div className="modal-backdrop" onClick={() => setConfirmZkSend(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">{t('wallet.confirmTitle')}</div>
+            <p className="modal-body">
+              {t('wallet.confirmBody')}<br />
+              <strong>{ZKID_DENOMINATIONS.find(d => d.value === zkDenom)?.label || ''} NARA</strong> → <strong>{zkName.trim()}</strong>
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setConfirmZkSend(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" onClick={handleZkDeposit}>{t('wallet.confirmSend')}</button>
             </div>
           </div>
         </div>

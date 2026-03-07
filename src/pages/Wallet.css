@@ -230,7 +230,71 @@
   text-decoration: underline;
 }
 
+/* ZK ID private transfer */
+.zk-denom-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.zk-denom-btn {
+  padding: 8px 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.zk-denom-btn:hover { border-color: var(--amber-dim); color: var(--text); }
+.zk-denom-btn.active {
+  background: var(--amber);
+  color: var(--bg);
+  border-color: var(--amber);
+  font-weight: 700;
+}
+
+.zk-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 20px 0;
+}
+
+.zk-no-deposits {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 12px;
+}
+
+.zk-deposit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.zk-deposit-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.zk-deposit-amount {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--amber);
+}
+
 @media (max-width: 480px) {
   .wallet-balance-val { font-size: 40px; }
   .mnemonic-grid { grid-template-columns: repeat(2, 1fr); }
+  .zk-denom-grid { grid-template-columns: repeat(2, 1fr); }
 }
