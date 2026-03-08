@@ -1,84 +1,31 @@
 /**
- * Browser-compatible quest module
- * Adapted from nara-sdk/src/quest.ts — no Node.js fs/path/url imports
+ * Quest module — browser-compatible wrapper.
+ * Uses nara-sdk for: ZK proof generation, agent registry, reward parsing.
+ * Keeps local: fetchQuestAndStatus (optimized single RPC), submitAnswerDirect (polling confirmation).
  */
-import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL, SYSVAR_INSTRUCTIONS_PUBKEY, Transaction } from '@solana/web3.js'
-import * as anchor from '@coral-xyz/anchor'
+import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL, Transaction } from '@solana/web3.js'
 import { Program, AnchorProvider } from '@coral-xyz/anchor'
 import naraQuestIdl from '../node_modules/nara-sdk/src/idls/nara_quest.json'
-import naraAgentRegistryIdl from '../node_modules/nara-sdk/src/idls/nara_agent_registry.json'
-
-// Anchor browser build doesn't export Wallet — minimal implementation
-class NodeWallet {
-  constructor(payer) { this.payer = payer; this.publicKey = payer.publicKey }
-  async signTransaction(tx) { tx.partialSign(this.payer); return tx }
-  async signAllTransactions(txs) { txs.forEach(tx => tx.partialSign(this.payer)); return txs }
-}
+import {
+  generateProof as sdkGenerateProof,
+  submitAnswerViaRelay as sdkSubmitAnswerViaRelay,
+  parseQuestReward as sdkParseQuestReward,
+} from 'nara-sdk/src/quest'
+import {
+  registerAgent as sdkRegisterAgent,
+  registerAgentWithReferral as sdkRegisterAgentWithReferral,
+  getAgentRecord,
+  getConfig as getAgentRegistryConfig,
+  makeLogActivityIx as sdkMakeLogActivityIx,
+  makeLogActivityWithReferralIx as sdkMakeLogActivityWithReferralIx,
+} from 'nara-sdk/src/agent_registry'
 
 const QUEST_PROGRAM_ID = 'Quest11111111111111111111111111111111111111'
-const AGENT_REGISTRY_PROGRAM_ID = 'AgentRegistry111111111111111111111111111111'
-const DEFAULT_RELAY_URL = 'https://quest-api.nara.build'
-const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL')
-const TOKEN_2022_PROGRAM_ID = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb')
-
-// ── ZK constants ────────────────────────────────────────────────
-const BN254_FIELD = 21888242871839275222246405745257275088696311157297823662689037894645226208583n
-
-function toBigEndian32(v) {
-  return Buffer.from(v.toString(16).padStart(64, '0'), 'hex')
-}
-
-function answerToField(answer) {
-  return BigInt('0x' + Buffer.from(answer, 'utf-8').toString('hex')) % BN254_FIELD
-}
-
-function hashBytesToFieldStr(hashBytes) {
-  return BigInt('0x' + Buffer.from(hashBytes).toString('hex')).toString()
-}
-
-function pubkeyToCircuitInputs(pubkey) {
-  const bytes = pubkey.toBuffer()
-  return {
-    lo: BigInt('0x' + bytes.subarray(16, 32).toString('hex')).toString(),
-    hi: BigInt('0x' + bytes.subarray(0, 16).toString('hex')).toString(),
-  }
-}
-
-function proofToSolana(proof) {
-  const negY = (y) => toBigEndian32(BN254_FIELD - BigInt(y))
-  const be = (s) => toBigEndian32(BigInt(s))
-  return {
-    proofA: Array.from(Buffer.concat([be(proof.pi_a[0]), negY(proof.pi_a[1])])),
-    proofB: Array.from(Buffer.concat([
-      be(proof.pi_b[0][1]), be(proof.pi_b[0][0]),
-      be(proof.pi_b[1][1]), be(proof.pi_b[1][0]),
-    ])),
-    proofC: Array.from(Buffer.concat([be(proof.pi_c[0]), be(proof.pi_c[1])])),
-  }
-}
-
-function proofToHex(proof) {
-  const negY = (y) => toBigEndian32(BN254_FIELD - BigInt(y))
-  const be = (s) => toBigEndian32(BigInt(s))
-  return {
-    proofA: Buffer.concat([be(proof.pi_a[0]), negY(proof.pi_a[1])]).toString('hex'),
-    proofB: Buffer.concat([
-      be(proof.pi_b[0][1]), be(proof.pi_b[0][0]),
-      be(proof.pi_b[1][1]), be(proof.pi_b[1][0]),
-    ]).toString('hex'),
-    proofC: Buffer.concat([be(proof.pi_c[0]), be(proof.pi_c[1])]).toString('hex'),
-  }
-}
 
 // ── Anchor helpers ──────────────────────────────────────────────
 function createProgram(connection, wallet) {
   const idlWithPid = { ...naraQuestIdl, address: QUEST_PROGRAM_ID }
-  const provider = new AnchorProvider(
-    connection,
-    new NodeWallet(wallet),
-    { commitment: 'confirmed' }
-  )
-  anchor.setProvider(provider)
+  const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' })
   return new Program(idlWithPid, provider)
 }
 
@@ -91,22 +38,18 @@ function getPoolPda() {
 function getWinnerRecordPda(user) {
   const pid = new PublicKey(QUEST_PROGRAM_ID)
   const [pda] = PublicKey.findProgramAddressSync(
-    [Buffer.from('quest_winner'), user.toBuffer()],
-    pid
+    [Buffer.from('quest_winner'), user.toBuffer()], pid
   )
   return pda
 }
-
-// ── Public API ──────────────────────────────────────────────────
 
 function parsePoolAccount(program, data) {
   const pool = program.coder.accounts.decode('pool', data)
   const now = Math.floor(Date.now() / 1000)
   const deadline = pool.deadline.toNumber()
   const secsLeft = deadline - now
-  const active = pool.question.length > 0 && secsLeft > 0
   return {
-    active,
+    active: pool.question.length > 0 && secsLeft > 0,
     round: pool.round.toString(),
     question: pool.question,
     answerHash: Array.from(pool.answerHash),
@@ -122,19 +65,11 @@ function parsePoolAccount(program, data) {
   }
 }
 
-function parseWinnerRecord(program, data, currentRound) {
-  try {
-    const wr = program.coder.accounts.decode('winnerRecord', data)
-    if (wr.round.toString() === currentRound) {
-      return { answered: true }
-    }
-  } catch { /* account doesn't exist or decode fails */ }
-  return { answered: false }
-}
+// ── Quest Public API ────────────────────────────────────────────
 
 /**
- * Fetch quest info + answer status in a single RPC call (getMultipleAccounts)
- * If userPubkey is provided, also checks winner record for current round
+ * Fetch quest info + answer status in a single RPC call (getMultipleAccounts).
+ * This is a browser-optimized version that avoids multiple RPC roundtrips.
  */
 export async function fetchQuestAndStatus(connection, userPubkey) {
   const kp = Keypair.generate()
@@ -145,98 +80,39 @@ export async function fetchQuestAndStatus(connection, userPubkey) {
   if (userPubkey) pdas.push(getWinnerRecordPda(userPubkey))
 
   const accounts = await connection.getMultipleAccountsInfo(pdas)
-
-  // Pool account must exist
   if (!accounts[0]) throw new Error('Quest pool account not found')
-  // Skip 8-byte discriminator is handled by Anchor coder
   const quest = parsePoolAccount(program, accounts[0].data)
 
   let roundStatus = { answered: false }
   if (userPubkey && accounts[1]?.data) {
-    roundStatus = parseWinnerRecord(program, accounts[1].data, quest.round)
+    try {
+      const wr = program.coder.accounts.decode('winnerRecord', accounts[1].data)
+      if (wr.round.toString() === quest.round) roundStatus = { answered: true }
+    } catch { /* not answered */ }
   }
 
   return { quest, roundStatus }
 }
 
-/**
- * Fetch current quest info from chain (single account)
- */
-export async function getQuestInfo(connection) {
-  const { quest } = await fetchQuestAndStatus(connection, null)
-  return quest
-}
-
-/**
- * Check wallet SOL balance (in lamports)
- */
 export async function getBalance(connection, pubkey) {
-  try {
-    return await connection.getBalance(pubkey)
-  } catch {
-    return 0
-  }
+  try { return await connection.getBalance(pubkey) }
+  catch { return 0 }
 }
 
-/**
- * Generate ZK proof for a quest answer (browser-compatible, uses URL for circuit files)
- */
+/** Generate ZK proof — delegates to SDK with browser URL paths */
 export async function generateProof(answer, answerHash, userPubkey, round) {
-  const snarkjs = await import('snarkjs')
-  const answerHashFieldStr = hashBytesToFieldStr(answerHash)
-  const { lo, hi } = pubkeyToCircuitInputs(userPubkey)
-
-  const wasmUrl = '/zk/answer_proof.wasm'
-  const zkeyUrl = '/zk/answer_proof_final.zkey'
-
-  const result = await snarkjs.groth16.fullProve(
-    {
-      answer: answerToField(answer).toString(),
-      answer_hash: answerHashFieldStr,
-      pubkey_lo: lo,
-      pubkey_hi: hi,
-      round: round,
-    },
-    wasmUrl,
-    zkeyUrl,
-  )
-
-  return {
-    solana: proofToSolana(result.proof),
-    hex: proofToHex(result.proof),
-  }
-}
-
-/**
- * Submit answer via relay (gasless) — for wallets with no balance
- */
-export async function submitAnswerViaRelay(relayUrl, userPubkey, proofHex, agent = '', model = '') {
-  const base = relayUrl.replace(/\/+$/, '')
-  const body = {
-    user: userPubkey.toBase58(),
-    proofA: proofHex.proofA,
-    proofB: proofHex.proofB,
-    proofC: proofHex.proofC,
-    agent,
-    model,
-  }
-  const res = await fetch(`${base}/submit-answer`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+  return sdkGenerateProof(answer, answerHash, userPubkey, round, {
+    circuitWasmPath: '/zk/answer_proof.wasm',
+    zkeyPath: '/zk/answer_proof_final.zkey',
   })
-
-  const data = await res.json()
-  if (!res.ok) {
-    throw new Error(data.error ?? `Relay HTTP ${res.status}`)
-  }
-  return { txHash: data.txHash }
 }
 
+/** Submit answer via relay (gasless) */
+export { sdkSubmitAnswerViaRelay as submitAnswerViaRelay }
+
 /**
- * Submit answer directly on-chain (requires SOL for gas).
- * If activityLog is provided and agent is registered, appends a logActivity IX.
- * activityLog: { agentId, model, activity, log, referralAgentId? }
+ * Submit answer directly on-chain with polling confirmation (no WebSocket).
+ * Optionally appends a logActivity instruction.
  */
 export async function submitAnswerDirect(connection, walletKeypair, proofSolana, agent = '', model = '', activityLog = null) {
   const program = createProgram(connection, walletKeypair)
@@ -250,12 +126,8 @@ export async function submitAnswerDirect(connection, walletKeypair, proofSolana,
 
   if (activityLog) {
     const logIx = await makeLogActivityIx(
-      connection,
-      walletKeypair.publicKey,
-      activityLog.agentId,
-      activityLog.model,
-      activityLog.activity,
-      activityLog.log,
+      connection, walletKeypair.publicKey,
+      activityLog.agentId, activityLog.model, activityLog.activity, activityLog.log,
       activityLog.referralAgentId
     )
     tx.add(logIx)
@@ -266,7 +138,6 @@ export async function submitAnswerDirect(connection, walletKeypair, proofSolana,
   tx.sign(walletKeypair)
 
   const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true })
-  // Poll for confirmation (avoid confirmTransaction which uses WebSocket)
   const start = Date.now()
   while (Date.now() - start < 10000) {
     await new Promise(r => setTimeout(r, 2000))
@@ -279,256 +150,47 @@ export async function submitAnswerDirect(connection, walletKeypair, proofSolana,
   return { signature }
 }
 
-/**
- * Parse reward info from a transaction signature
- */
-export async function parseQuestReward(connection, txSignature, retries = 10) {
-  await new Promise(r => setTimeout(r, 2000))
+/** Parse reward info — delegates to SDK */
+export { sdkParseQuestReward as parseQuestReward }
 
-  let txInfo
-  for (let i = 0; i < retries; i++) {
-    try {
-      txInfo = await connection.getTransaction(txSignature, {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0,
-      })
-      if (txInfo) break
-    } catch { /* retry */ }
-    await new Promise(r => setTimeout(r, 1000))
-  }
+// ── Agent Registry (delegated to nara-sdk) ────────────────────
 
-  if (!txInfo) throw new Error('Failed to fetch transaction details')
-
-  let rewardLamports = 0
-  let winner = ''
-  const logs = txInfo.meta?.logMessages ?? []
-  for (const log of logs) {
-    const m = log.match(/reward (\d+) lamports \(winner (\d+\/\d+)\)/)
-    if (m) {
-      rewardLamports = parseInt(m[1])
-      winner = m[2]
-      break
-    }
-  }
-
-  return {
-    rewardLamports,
-    rewardNso: rewardLamports / LAMPORTS_PER_SOL,
-    winner,
-  }
-}
-
-// ── Log Activity ──────────────────────────────────────────────
-
-/**
- * Build a logActivity instruction (browser-compatible).
- * Used to append to submit-answer transactions for registered agents.
- * @param referralAgentId - Optional referral agent ID for earning referral points.
- */
 export async function makeLogActivityIx(connection, authority, agentId, model, activity, log, referralAgentId) {
-  const program = createRegistryProgram(connection, Keypair.generate())
-  const pointMint = getPointMintPda()
-  const authorityPointAccount = getAssociatedTokenAddress(pointMint, authority)
-
-  let referralAccounts = { referralAgent: null, referralAuthority: null, referralPointAccount: null }
   if (referralAgentId) {
-    referralAccounts = await resolveReferralAccounts(connection, referralAgentId)
+    return sdkMakeLogActivityWithReferralIx(connection, authority, agentId, model, activity, log, referralAgentId)
   }
-
-  return program.methods
-    .logActivity(agentId, model, activity, log)
-    .accounts({
-      authority,
-      authorityPointAccount,
-      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
-      ...referralAccounts,
-    })
-    .instruction()
+  return sdkMakeLogActivityIx(connection, authority, agentId, model, activity, log)
 }
 
-// ── Agent Registry ─────────────────────────────────────────────
-
-function createRegistryProgram(connection, wallet) {
-  const idlWithPid = { ...naraAgentRegistryIdl, address: AGENT_REGISTRY_PROGRAM_ID }
-  const provider = new AnchorProvider(
-    connection,
-    new NodeWallet(wallet),
-    { commitment: 'confirmed' }
-  )
-  anchor.setProvider(provider)
-  return new Program(idlWithPid, provider)
-}
-
-function getConfigPda() {
-  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
-  const [pda] = PublicKey.findProgramAddressSync([Buffer.from('config')], pid)
-  return pda
-}
-
-function getAgentPda(agentId) {
-  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
-  const [pda] = PublicKey.findProgramAddressSync(
-    [Buffer.from('agent'), Buffer.from(agentId)],
-    pid
-  )
-  return pda
-}
-
-function getPointMintPda() {
-  const pid = new PublicKey(AGENT_REGISTRY_PROGRAM_ID)
-  const [pda] = PublicKey.findProgramAddressSync([Buffer.from('point_mint')], pid)
-  return pda
-}
-
-function getAssociatedTokenAddress(mint, owner) {
-  const [ata] = PublicKey.findProgramAddressSync(
-    [owner.toBuffer(), TOKEN_2022_PROGRAM_ID.toBuffer(), mint.toBuffer()],
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  )
-  return ata
-}
-
-async function resolveReferralAccounts(connection, referralAgentId) {
-  const pointMint = getPointMintPda()
-  const referralAgent = getAgentPda(referralAgentId)
-  const accountInfo = await connection.getAccountInfo(referralAgent)
-  if (!accountInfo) throw new Error(`Referral agent "${referralAgentId}" not found`)
-  // Authority is first 32 bytes after 8-byte discriminator
-  const referralAuthority = new PublicKey(accountInfo.data.subarray(8, 40))
-  const referralPointAccount = getAssociatedTokenAddress(pointMint, referralAuthority)
-  return { referralAgent, referralAuthority, referralPointAccount }
-}
-
-/**
- * Fetch agent registry program config (register fee, points config, etc.)
- */
-export async function getRegistryConfig(connection) {
-  try {
-    const configPda = getConfigPda()
-    const info = await connection.getAccountInfo(configPda)
-    if (!info) throw new Error('Program config not initialized')
-    const buf = Buffer.from(info.data)
-    let offset = 8 // skip discriminator
-    const admin = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
-    const feeRecipient = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
-    const pointMint = new PublicKey(buf.subarray(offset, offset + 32)); offset += 32
-    const registerFee = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const pointsSelf = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const pointsReferral = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const referralRegisterFee = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const referralFeeShare = Number(buf.readBigUInt64LE(offset)); offset += 8
-    const referralRegisterPoints = Number(buf.readBigUInt64LE(offset))
-    return { admin, feeRecipient, pointMint, registerFee, pointsSelf, pointsReferral, referralRegisterFee, referralFeeShare, referralRegisterPoints }
-  } catch (e) {
-    throw new Error(`Failed to fetch registry config: ${e.message}`)
-  }
-}
-
-/**
- * Register an agent on-chain (browser-compatible, no WebSocket)
- * @param referralAgentId - Optional referral agent ID. If provided and valid, registers with referral.
- */
 export async function registerAgent(connection, walletKeypair, agentId, referralAgentId) {
-  if (/[A-Z]/.test(agentId)) {
-    throw new Error('Agent ID must be lowercase')
-  }
-  const program = createRegistryProgram(connection, walletKeypair)
-  const config = await getRegistryConfig(connection)
-
-  let referralAccounts = { referralAgent: null, referralAuthority: null, referralPointAccount: null }
   if (referralAgentId) {
-    referralAccounts = await resolveReferralAccounts(connection, referralAgentId)
+    return sdkRegisterAgentWithReferral(connection, walletKeypair, agentId, referralAgentId)
   }
-
-  const tx = await program.methods
-    .registerAgent(agentId)
-    .accounts({
-      authority: walletKeypair.publicKey,
-      feeRecipient: config.feeRecipient,
-      ...referralAccounts,
-    })
-    .signers([walletKeypair])
-    .transaction()
-
-  tx.feePayer = walletKeypair.publicKey
-  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash
-  tx.sign(walletKeypair)
-
-  const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false })
-
-  // Poll for confirmation
-  const start = Date.now()
-  while (Date.now() - start < 15000) {
-    await new Promise(r => setTimeout(r, 2000))
-    try {
-      const { value } = await connection.getSignatureStatuses([signature])
-      const status = value?.[0]
-      if (status?.err) throw new Error(`Registration failed: ${JSON.stringify(status.err)}`)
-      if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') {
-        return { signature, agentPubkey: getAgentPda(agentId) }
-      }
-    } catch (e) {
-      if (e.message.includes('Registration failed')) throw e
-    }
-  }
-  throw new Error('Registration confirmation timeout')
+  return sdkRegisterAgent(connection, walletKeypair, agentId)
 }
 
-/**
- * Check if an agent ID is already registered on-chain
- */
+export { getAgentRegistryConfig as getRegistryConfig }
+
 export async function checkAgentRegistered(connection, agentId) {
-  try {
-    const agentPda = getAgentPda(agentId)
-    const info = await connection.getAccountInfo(agentPda)
-    return !!info
-  } catch {
-    return false
-  }
+  try { await getAgentRecord(connection, agentId); return true }
+  catch { return false }
 }
 
-/**
- * Fetch agent's on-chain referral ID from the AgentRecord.
- * Layout (after 8-byte discriminator):
- *   32 authority | 32 pending_buffer | 32 memory |
- *   8 created_at | 8 updated_at |
- *   4 version | 4 agent_id_len | 32 agent_id |
- *   4 referral_id_len | 32 referral_id
- */
 export async function getAgentReferral(connection, agentId) {
   try {
-    const agentPda = getAgentPda(agentId)
-    const info = await connection.getAccountInfo(agentPda)
-    if (!info) return null
-    const buf = Buffer.from(info.data)
-    // offset: 8 + 32 + 32 + 32 + 8 + 8 + 4 + 4 + 32 = 160
-    const referralIdLen = buf.readUInt32LE(160)
-    if (referralIdLen === 0) return null
-    return buf.subarray(164, 164 + referralIdLen).toString('utf-8')
-  } catch {
-    return null
-  }
+    const record = await getAgentRecord(connection, agentId)
+    return record.referralId || null
+  } catch { return null }
 }
 
-/**
- * Fetch agent points from SPL Token-2022 account balance.
- * Points are now minted as tokens to the agent authority's ATA.
- */
 export async function getAgentPoints(connection, agentId) {
   try {
-    const agentPda = getAgentPda(agentId)
-    const info = await connection.getAccountInfo(agentPda)
-    if (!info) return 0
-    // Authority is first 32 bytes after 8-byte discriminator
-    const authority = new PublicKey(info.data.subarray(8, 40))
-    const pointMint = getPointMintPda()
-    const ata = getAssociatedTokenAddress(pointMint, authority)
+    const record = await getAgentRecord(connection, agentId)
+    const config = await getAgentRegistryConfig(connection)
+    const { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID: T22 } = await import('@solana/spl-token')
+    const ata = getAssociatedTokenAddressSync(config.pointMint, record.authority, true, T22)
     const ataInfo = await connection.getAccountInfo(ata)
     if (!ataInfo) return 0
-    // Token-2022 account: amount is at offset 64 (after mint 32 + owner 32), u64 LE
-    const amount = Number(Buffer.from(ataInfo.data).readBigUInt64LE(64))
-    return amount
-  } catch {
-    return 0
-  }
+    return Number(Buffer.from(ataInfo.data).readBigUInt64LE(64))
+  } catch { return 0 }
 }
