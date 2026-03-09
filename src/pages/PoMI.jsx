@@ -154,9 +154,9 @@ export default function PoMI() {
       setTimeLeft(prev => {
         if (prev <= 1) {
           clearInterval(timerRef.current)
-          // If not auto-mining, silently refresh after 2s
+          // If not auto-mining, silently refresh after 1s
           if (!miningRef.current) {
-            setTimeout(fetchQuest, 2000)
+            setTimeout(fetchQuest, 1000)
           }
           return 0
         }
@@ -303,7 +303,7 @@ export default function PoMI() {
   const startMiningLoop = useCallback(async () => {
     while (miningRef.current) {
       const q = questRef.current
-      if (!q) { await new Promise(r => setTimeout(r, 2000)); continue }
+      if (!q) { await new Promise(r => setTimeout(r, 1000)); continue }
 
       // If already answered this round or quest expired → skip to waiting
       if (q.expired || !q.active) {
@@ -511,6 +511,7 @@ export default function PoMI() {
               </button>
             ) : (
               <button className="btn btn-primary btn-lg" onClick={handleToggleMining}>
+                <img src="/claw.png" alt="" style={{ width: 64, height: 64, margin: '-12px 8px -12px 0', verticalAlign: 'middle' }} />
                 {t('pomi.startMining')}
               </button>
             )}
