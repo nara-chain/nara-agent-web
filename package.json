@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "pnpm run build && wrangler dev",
+    "deploy": "pnpm run build && wrangler deploy"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -26,8 +27,10 @@
     "vite-plugin-node-polyfills": "^0.25.0"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.26.1",
     "@vitejs/plugin-react": "^5.1.4",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "wrangler": "^4.71.0"
   },
   "packageManager": "pnpm@10.27.0+sha512.72d699da16b1179c14ba9e64dc71c9a40988cbdc65c264cb0e489db7de917f20dcf4d64d8723625f2969ba52d4b7e2a1170682d9ac2a5dcaeaab732b7e16f04a"
 }
