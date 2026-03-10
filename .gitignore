@@ -8,3 +8,9 @@ dist
 bun.lock
 docs
 CLAUDE.md
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
