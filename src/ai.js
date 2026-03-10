@@ -14,11 +14,36 @@ export function getApiType(baseUrl) {
   return apiTypeCache[baseUrl?.replace(/\/$/, '')] ?? null
 }
 
+/** Wrap fetch to capture raw error response body (SDK sometimes reports "no body") */
+function createFetchWithErrorCapture() {
+  return async (url, init) => {
+    const res = await fetch(url, init)
+    if (!res.ok) {
+      const body = await res.text()
+      const err = new Error(`${res.status} ${body || res.statusText}`)
+      err.status = res.status
+      err.error = tryParseJSON(body)
+      err.rawBody = body
+      throw err
+    }
+    return res
+  }
+}
+
+function tryParseJSON(s) { try { return JSON.parse(s) } catch { return null } }
+
+function logError(log, endpoint, e) {
+  log(`✗ ${endpoint} failed: ${e.status ?? ''} ${e.rawBody ?? e.message}`)
+}
+
 function getClient(baseUrl, apiKey) {
   const base = baseUrl.replace(/\/$/, '')
   const key = `${base}::${apiKey}`
   if (!clientCache[key]) {
-    clientCache[key] = new OpenAI({ baseURL: base, apiKey, dangerouslyAllowBrowser: true })
+    clientCache[key] = new OpenAI({
+      baseURL: base, apiKey, dangerouslyAllowBrowser: true,
+      fetch: createFetchWithErrorCapture(),
+    })
   }
   return clientCache[key]
 }
@@ -60,8 +85,7 @@ export async function callAI(cfg, prompt, opts = {}) {
   } catch (e) {
     if (e.name === 'AbortError') throw e
     completionsErr = e
-    log(`✗ /chat/completions failed: ${e.status ?? ''} ${e.message}`)
-    if (e.error) log(`  Detail: ${JSON.stringify(e.error)}`)
+    logError(log, '/chat/completions', e)
   }
 
   log(`Trying /responses ...`)
@@ -72,8 +96,7 @@ export async function callAI(cfg, prompt, opts = {}) {
     return result
   } catch (e) {
     if (e.name === 'AbortError') throw e
-    log(`✗ /responses failed: ${e.status ?? ''} ${e.message}`)
-    if (e.error) log(`  Detail: ${JSON.stringify(e.error)}`)
+    logError(log, '/responses', e)
     // Both failed — throw the more informative error
     throw completionsErr.status ? completionsErr : e
   }
