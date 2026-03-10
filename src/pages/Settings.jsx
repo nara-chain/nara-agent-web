@@ -254,7 +254,7 @@ export default function Settings() {
             <label className="input-label">{t('settings.baseUrl')}</label>
             <input className="input" type="url" placeholder="https://api.openai.com/v1"
               value={form.baseUrl} onChange={e => set('baseUrl', e.target.value)} />
-            <span className="settings-hint">{t('settings.expose')} <code>/chat/completions</code></span>
+            <span className="settings-hint">{t('settings.expose')} <code>/chat/completions</code> or <code>/responses</code></span>
           </div>
           <div className="input-group">
             <label className="input-label">{t('settings.modelId')}</label>
