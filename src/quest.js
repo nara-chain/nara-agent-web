@@ -4,6 +4,7 @@
  * Keeps local: fetchQuestAndStatus (optimized single RPC), submitAnswerDirect (polling confirmation).
  */
 import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
+import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token'
 import { Program, AnchorProvider } from '@coral-xyz/anchor'
 import naraQuestIdl from '../node_modules/nara-sdk/src/idls/nara_quest.json'
 import {
@@ -162,8 +163,7 @@ export async function getAgentPoints(connection, agentId) {
   try {
     const record = await getAgentRecord(connection, agentId)
     const config = await getAgentRegistryConfig(connection)
-    const { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID: T22 } = await import('@solana/spl-token')
-    const ata = getAssociatedTokenAddressSync(config.pointMint, record.authority, true, T22)
+    const ata = getAssociatedTokenAddressSync(config.pointMint, record.authority, true, TOKEN_2022_PROGRAM_ID)
     const ataInfo = await connection.getAccountInfo(ata)
     if (!ataInfo) return 0
     return Number(Buffer.from(ataInfo.data).readBigUInt64LE(64))
