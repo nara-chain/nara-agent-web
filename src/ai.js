@@ -60,7 +60,8 @@ export async function callAI(cfg, prompt, opts = {}) {
   } catch (e) {
     if (e.name === 'AbortError') throw e
     completionsErr = e
-    log(`✗ /chat/completions failed: ${e.message}`)
+    log(`✗ /chat/completions failed: ${e.status ?? ''} ${e.message}`)
+    if (e.error) log(`  Detail: ${JSON.stringify(e.error)}`)
   }
 
   log(`Trying /responses ...`)
@@ -71,7 +72,8 @@ export async function callAI(cfg, prompt, opts = {}) {
     return result
   } catch (e) {
     if (e.name === 'AbortError') throw e
-    log(`✗ /responses failed: ${e.message}`)
+    log(`✗ /responses failed: ${e.status ?? ''} ${e.message}`)
+    if (e.error) log(`  Detail: ${JSON.stringify(e.error)}`)
     // Both failed — throw the more informative error
     throw completionsErr.status ? completionsErr : e
   }
