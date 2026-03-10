@@ -17,6 +17,9 @@ importers:
       bip39:
         specifier: ^3.1.0
         version: 3.1.0
+      bn.js:
+        specifier: ^5.2.3
+        version: 5.2.3
       bs58:
         specifier: ^5.0.0
         version: 5.0.0
