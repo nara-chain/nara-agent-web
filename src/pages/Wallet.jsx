@@ -3,7 +3,9 @@ import { Keypair, Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PE
 import * as bip39 from 'bip39'
 import { derivePath } from 'ed25519-hd-key'
 import bs58 from 'bs58'
+import nacl from 'tweetnacl'
 import { useApp } from '../store.jsx'
+import { MODEL_HUB_BASE } from '../constants.js'
 import { useI18n } from '../i18n.jsx'
 import {
   ZKID_DENOMINATIONS, getZkIdInfo, getZkIdConfig, createZkId,
@@ -29,7 +31,7 @@ function Toast({ msg, type, onClose }) {
 }
 
 export default function Wallet() {
-  const { wallet, setWallet, rpcUrl } = useApp()
+  const { wallet, setWallet, rpcUrl, model, updateModel, setModelOk } = useApp()
   const { t } = useI18n()
 
   const [tab, setTab]               = useState('main')
@@ -42,7 +44,7 @@ export default function Wallet() {
   const [amount, setAmount]         = useState('')
   const [sending, setSending]       = useState(false)
   const [showTransfer, setShowTransfer] = useState(false)
-  const [transferTab, setTransferTab] = useState('normal') // 'normal' | 'private'
+  const [transferTab, setTransferTab] = useState('normal') // 'normal' | 'private' | 'compute'
   const [txResult, setTxResult]     = useState(null) // { ok, sig, error }
   const [confirmSend, setConfirmSend] = useState(false)
   const [confirmZkSend, setConfirmZkSend] = useState(false)
@@ -61,11 +63,20 @@ export default function Wallet() {
   const [zkScanning, setZkScanning]       = useState(false)
   const [zkWithdrawing, setZkWithdrawing] = useState(null) // index being withdrawn
 
+  // Buy Compute (x402) state
+  const [buyAmount, setBuyAmount]       = useState('')
+  const [buying, setBuying]             = useState(false)
+  const [buyResult, setBuyResult]       = useState(null) // { ok, data, error }
+  const [confirmBuy, setConfirmBuy]     = useState(false)
+  const [hubConfig, setHubConfig]       = useState(null)  // { address, rate, endpoints }
+  const [hubInfo, setHubInfo]           = useState(null)   // { api_key, balance } or 'loading' or 'none'
+
   const notify = useCallback((msg, type = 'ok') => setToast({ msg, type }), [])
 
   const clearTransferInputs = useCallback(() => {
     setToAddr(''); setAmount(''); setTxResult(null); setConfirmSend(false)
     setZkName(''); setZkDenom(ZKID_DENOMINATIONS[0].value); setZkResult(null); setConfirmZkSend(false)
+    setBuyAmount(''); setBuyResult(null); setConfirmBuy(false)
   }, [])
 
   const fetchBalance = useCallback(async () => {
@@ -205,6 +216,110 @@ export default function Wallet() {
     if (!zkName.trim()) { notify(t('wallet.fillFields'), 'err'); return }
     setConfirmZkSend(true)
   }, [zkName, notify, t])
+
+  // ── Buy Compute (x402) handlers ────────────────────────────
+  const fetchHubConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`${MODEL_HUB_BASE}/402`)
+      const text = await res.text()
+      const json = JSON.parse(text)
+      const x = json.x402
+      if (!x?.address || !x?.rate) throw new Error('Invalid x402 response')
+      setHubConfig({ address: x.address, rate: x.rate, endpoints: x.endpoints, models: x.models || [] })
+    } catch (e) {
+      console.error('fetchHubConfig failed:', e)
+      setHubConfig(null)
+    }
+  }, [])
+
+  const signMessage = useCallback((kp, message) => {
+    const msgBytes = new TextEncoder().encode(message)
+    const sig = nacl.sign.detached(msgBytes, kp.secretKey)
+    return bs58.encode(sig)
+  }, [])
+
+  const fetchHubInfo = useCallback(async () => {
+    if (!wallet || !hubConfig) return
+    setHubInfo('loading')
+    try {
+      const kp = storeToKeypair(wallet)
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = signMessage(kp, `info:${ts}`)
+      const infoPath = hubConfig.endpoints.info.path
+      const url = `${MODEL_HUB_BASE}${infoPath}?address=${kp.publicKey.toBase58()}&ts=${ts}&sign=${sign}`
+      const res = await fetch(url)
+      if (!res.ok) { setHubInfo('none'); return }
+      const json = await res.json()
+      setHubInfo(json.data)
+    } catch { setHubInfo('none') }
+  }, [wallet, hubConfig, signMessage])
+
+  useEffect(() => {
+    if (showTransfer && transferTab === 'compute') {
+      if (!hubConfig) fetchHubConfig()
+    }
+  }, [showTransfer, transferTab, hubConfig, fetchHubConfig])
+
+  useEffect(() => {
+    if (showTransfer && transferTab === 'compute' && hubConfig && wallet) fetchHubInfo()
+  }, [showTransfer, transferTab, hubConfig, wallet])
+
+  const handleBuyClick = useCallback(() => {
+    if (!buyAmount) { notify(t('wallet.fillFields'), 'err'); return }
+    const nara = parseFloat(buyAmount)
+    if (isNaN(nara) || nara <= 0) { notify(t('wallet.invalidAmount'), 'err'); return }
+    if (hubConfig && nara / hubConfig.rate < 1) { notify(t('wallet.buyMinimum'), 'err'); return }
+    setConfirmBuy(true)
+  }, [buyAmount, hubConfig, notify, t])
+
+  const handleBuyCompute = useCallback(async () => {
+    setConfirmBuy(false)
+    if (!buyAmount || !hubConfig) return
+    const lamports = Math.round(parseFloat(buyAmount) * LAMPORTS_PER_SOL)
+    if (isNaN(lamports) || lamports <= 0) return
+    setBuying(true); setBuyResult(null)
+    try {
+      const conn = new Connection(rpcUrl, 'confirmed')
+      const kp = storeToKeypair(wallet)
+      const chargeAddr = new PublicKey(hubConfig.address)
+
+      // 1. Transfer NARA to charge address
+      const tx = new Transaction().add(SystemProgram.transfer({ fromPubkey: kp.publicKey, toPubkey: chargeAddr, lamports }))
+      tx.recentBlockhash = (await conn.getLatestBlockhash('confirmed')).blockhash
+      tx.feePayer = kp.publicKey
+      tx.sign(kp)
+      const sig = await conn.sendRawTransaction(tx.serialize())
+
+      // 2. Poll for confirmation
+      for (let i = 0; i < 60; i++) {
+        const { value } = await conn.getSignatureStatuses([sig])
+        const status = value?.[0]
+        if (status?.err) throw new Error('Transaction failed')
+        if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') break
+        if (i === 59) throw new Error('Transaction confirmation timeout')
+        await new Promise(r => setTimeout(r, 2000))
+      }
+
+      // 3. Sign and call charge endpoint
+      const ts = Math.floor(Date.now() / 1000)
+      const sign = signMessage(kp, `${sig}:${ts}`)
+      const chargePath = hubConfig.endpoints.charge.path
+      const chargeUrl = `${MODEL_HUB_BASE}${chargePath}?address=${kp.publicKey.toBase58()}&tx=${sig}&ts=${ts}&sign=${sign}`
+      const chargeRes = await fetch(chargeUrl)
+      const chargeJson = await chargeRes.json()
+
+      if (!chargeRes.ok || !chargeJson.success) {
+        throw new Error(chargeJson.error || chargeJson.message || 'Charge failed')
+      }
+
+      setBuyResult({ ok: true, data: chargeJson.data })
+      setBuyAmount('')
+      fetchBalance()
+      fetchHubInfo()
+    } catch (e) {
+      setBuyResult({ ok: false, error: e.message || t('wallet.buyFailed') })
+    } finally { setBuying(false) }
+  }, [buyAmount, hubConfig, wallet, rpcUrl, fetchBalance, fetchHubInfo, signMessage, t])
 
   const handleSendClick = useCallback(() => {
     if (!toAddr || !amount) { notify(t('wallet.fillFields'), 'err'); return }
@@ -352,6 +467,8 @@ export default function Wallet() {
               onClick={() => { clearTransferInputs(); setTransferTab('normal') }}>{t('wallet.normalTransfer')}</button>
             <button className={`import-tab ${transferTab === 'private' ? 'active' : ''}`}
               onClick={() => { clearTransferInputs(); setTransferTab('private') }}>{t('wallet.privateTransfer')}</button>
+            <button className={`import-tab ${transferTab === 'compute' ? 'active' : ''}`}
+              onClick={() => { clearTransferInputs(); setTransferTab('compute') }}>{t('wallet.buyCompute')}</button>
           </div>
 
           {transferTab === 'normal' && (<>
@@ -480,6 +597,96 @@ export default function Wallet() {
               </>
             )}
           </>)}
+
+          {transferTab === 'compute' && (<>
+            <div className="card-title">
+              {t('wallet.buyComputeDesc')}
+              {hubConfig ? (
+                <span style={{ opacity: 0.6, fontSize: 12, marginLeft: 8 }}>({hubConfig.rate} {t('wallet.buyNaraPerCU')})</span>
+              ) : (
+                <span style={{ opacity: 0.4, fontSize: 12, marginLeft: 8 }}><div className="spinner" style={{ display: 'inline-block', width: 12, height: 12 }} /></span>
+              )}
+            </div>
+
+            {/* Hub account info */}
+            {hubInfo === 'loading' && <div style={{ marginBottom: 10, opacity: 0.6 }}>{t('wallet.hubLoading')}</div>}
+            {hubInfo === 'none' && <div style={{ marginBottom: 10, opacity: 0.6 }}>{t('wallet.hubNoAccount')}</div>}
+            {hubInfo && hubInfo !== 'loading' && hubInfo !== 'none' && (
+              <div style={{ marginBottom: 12, padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 12 }}>
+                <div><strong>{t('wallet.hubBalance')}:</strong> {hubInfo.balance?.toFixed(4) ?? '—'} CU</div>
+                {hubInfo.api_base && <div style={{ marginTop: 4 }}><strong>{t('wallet.apiBase')}:</strong> <code style={{ fontSize: 11, wordBreak: 'break-all' }}>{hubInfo.api_base}</code></div>}
+                {hubInfo.api_key && <div style={{ marginTop: 4 }}><strong>{t('wallet.apiKey')}:</strong> <code style={{ fontSize: 11, wordBreak: 'break-all' }}>{hubInfo.api_key}</code></div>}
+              </div>
+            )}
+
+            {hubInfo && hubInfo !== 'loading' && hubInfo !== 'none' && hubConfig?.models?.length > 0 && (
+              <div className="zk-divider" />
+            )}
+
+            {hubConfig?.models?.length > 0 && (
+              <div style={{ marginBottom: 12, padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 12 }}>
+                <div><strong>{t('wallet.availableModels')}:</strong></div>
+                <div style={{ marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {hubConfig.models.map(m => {
+                    const isActive = model.model === m && model.baseUrl === hubInfo?.api_base
+                    return (
+                      <button key={m} onClick={() => {
+                        if (!hubInfo?.api_base || !hubInfo?.api_key) { notify(t('wallet.hubNoAccount'), 'err'); return }
+                        updateModel({ ...model, baseUrl: hubInfo.api_base, apiKey: hubInfo.api_key, model: m })
+                        setModelOk(false)
+                        notify(t('wallet.setAsModel'))
+                      }}
+                        style={{ padding: '4px 12px', background: isActive ? 'var(--accent)' : 'var(--bg-tertiary)', color: isActive ? 'var(--bg-primary)' : 'inherit', borderRadius: 4, fontSize: 12, border: isActive ? 'none' : '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.15s' }}>
+                        {m}{isActive ? ' ✓' : ''}
+                      </button>
+                    )
+                  })}
+                </div>
+                <div style={{ marginTop: 6, opacity: 0.5, fontSize: 11 }}>{t('wallet.clickModelHint')}</div>
+              </div>
+            )}
+
+            <div className="input-group" style={{ marginBottom: 10 }}>
+              <label className="input-label">{t('wallet.buyAmount')}</label>
+              <input className="input" type="number" min="0" step="1" placeholder={hubConfig ? String(Math.ceil(hubConfig.rate)) : '1000'}
+                value={buyAmount} onChange={e => { setBuyAmount(e.target.value); setBuyResult(null) }} />
+              {buyAmount && hubConfig && (
+                <div style={{ marginTop: 4, fontSize: 12, opacity: 0.6 }}>
+                  ≈ {(parseFloat(buyAmount) / hubConfig.rate).toFixed(4)} CU
+                  {parseFloat(buyAmount) / hubConfig.rate < 1 && (
+                    <span style={{ color: 'var(--error)', marginLeft: 8 }}>{t('wallet.buyMinimum')}</span>
+                  )}
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button className="btn btn-primary" onClick={handleBuyClick} disabled={buying || !hubConfig}>
+                {buying ? <><div className="spinner" />{t('wallet.buying')}</> : t('wallet.buyBtn')}
+              </button>
+            </div>
+            {buyResult && (
+              <div className={`wallet-tx-result ${buyResult.ok ? 'wallet-tx-ok' : 'wallet-tx-err'}`}>
+                <span className="wallet-tx-icon">{buyResult.ok ? '✓' : '✗'}</span>
+                <div className="wallet-tx-body">
+                  {buyResult.ok ? (
+                    <>
+                      <div>{t('wallet.buySuccess')}</div>
+                      <div style={{ fontSize: 12, marginTop: 4 }}>
+                        {t('wallet.balanceAdded')}: {buyResult.data?.balance_added?.toFixed(4) ?? '—'} CU
+                      </div>
+                      {buyResult.data?.api_key && (
+                        <div style={{ fontSize: 11, marginTop: 4, wordBreak: 'break-all' }}>
+                          {t('wallet.apiKey')}: <code>{buyResult.data.api_key}</code>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div>{buyResult.error}</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </>)}
         </div>
       )}
 
@@ -511,6 +718,23 @@ export default function Wallet() {
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setConfirmZkSend(false)}>{t('common.cancel')}</button>
               <button className="btn btn-primary" onClick={handleZkDeposit}>{t('wallet.confirmSend')}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmBuy && (
+        <div className="modal-backdrop" onClick={() => setConfirmBuy(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">{t('wallet.confirmBuy')}</div>
+            <p className="modal-body">
+              {t('wallet.confirmBuyBody')}<br />
+              <strong>{buyAmount} NARA</strong>
+              {hubConfig && <> ≈ <strong>{(parseFloat(buyAmount) / hubConfig.rate).toFixed(4)} CU</strong></>}
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setConfirmBuy(false)}>{t('common.cancel')}</button>
+              <button className="btn btn-primary" onClick={handleBuyCompute}>{t('wallet.confirmSend')}</button>
             </div>
           </div>
         </div>
