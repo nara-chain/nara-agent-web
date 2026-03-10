@@ -1,4 +1,4 @@
-export * from '../node_modules/@coral-xyz/anchor/dist/browser/index.js'
+export * from '@coral-xyz/anchor-browser'
 
 export class Wallet {
   constructor(payer) {
