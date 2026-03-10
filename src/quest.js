@@ -3,14 +3,21 @@
  * Uses nara-sdk for: ZK proof generation, agent registry, reward parsing.
  * Keeps local: fetchQuestAndStatus (optimized single RPC), submitAnswerDirect (polling confirmation).
  */
-import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL, Transaction } from '@solana/web3.js'
+import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { Program, AnchorProvider } from '@coral-xyz/anchor'
 import naraQuestIdl from '../node_modules/nara-sdk/src/idls/nara_quest.json'
 import {
   generateProof as sdkGenerateProof,
+  submitAnswer as sdkSubmitAnswer,
   submitAnswerViaRelay as sdkSubmitAnswerViaRelay,
   parseQuestReward as sdkParseQuestReward,
 } from 'nara-sdk/src/quest'
+import { setAltAddress } from 'nara-sdk/src/tx'
+import { IS_TESTNET, DEFAULT_ALT_ADDRESS, DEFAULT_TESTNET_ALT_ADDRESS } from './constants.js'
+
+// Set ALT address for reduced tx size (supports stake + submit + activityLog in one tx)
+const altAddr = IS_TESTNET ? DEFAULT_TESTNET_ALT_ADDRESS : DEFAULT_ALT_ADDRESS
+if (altAddr) setAltAddress(altAddr)
 import {
   registerAgent as sdkRegisterAgent,
   registerAgentWithReferral as sdkRegisterAgentWithReferral,
@@ -111,43 +118,11 @@ export async function generateProof(answer, answerHash, userPubkey, round) {
 export { sdkSubmitAnswerViaRelay as submitAnswerViaRelay }
 
 /**
- * Submit answer directly on-chain with polling confirmation (no WebSocket).
- * Optionally appends a logActivity instruction.
+ * Submit answer directly on-chain (delegates to SDK).
+ * Uses ALT (Address Lookup Table) for smaller tx size when stake + submit + activityLog are combined.
  */
 export async function submitAnswerDirect(connection, walletKeypair, proofSolana, agent = '', model = '', activityLog = null) {
-  const program = createProgram(connection, walletKeypair)
-
-  const submitIx = await program.methods
-    .submitAnswer(proofSolana.proofA, proofSolana.proofB, proofSolana.proofC, agent, model)
-    .accounts({ user: walletKeypair.publicKey, payer: walletKeypair.publicKey })
-    .instruction()
-
-  const tx = new Transaction().add(submitIx)
-
-  if (activityLog) {
-    const logIx = await makeLogActivityIx(
-      connection, walletKeypair.publicKey,
-      activityLog.agentId, activityLog.model, activityLog.activity, activityLog.log,
-      activityLog.referralAgentId
-    )
-    tx.add(logIx)
-  }
-
-  tx.feePayer = walletKeypair.publicKey
-  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash
-  tx.sign(walletKeypair)
-
-  const signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true })
-  const start = Date.now()
-  while (Date.now() - start < 10000) {
-    await new Promise(r => setTimeout(r, 2000))
-    try {
-      const { value } = await connection.getSignatureStatuses([signature])
-      if (value?.[0]?.confirmationStatus === 'confirmed' || value?.[0]?.confirmationStatus === 'finalized') break
-    } catch { /* retry */ }
-  }
-
-  return { signature }
+  return sdkSubmitAnswer(connection, walletKeypair, proofSolana, agent, model, { stake: 'auto' }, activityLog)
 }
 
 /** Parse reward info — delegates to SDK */
