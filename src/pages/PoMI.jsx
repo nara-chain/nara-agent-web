@@ -14,6 +14,7 @@ import {
   checkAgentRegistered,
   getAgentReferral,
 } from '../quest.js'
+import { callAI } from '../ai.js'
 import './PoMI.css'
 
 function pad(n) { return String(n).padStart(2, '0') }
@@ -207,14 +208,11 @@ export default function PoMI() {
     try {
       // 1. AI generates answer
       const prompt = `Answer this question. Output ONLY the final answer — no reasoning, no explanation, no steps, no extra words. Just the answer itself.\n\nQuestion: ${currentQuest.question}`
-      const res = await fetch(`${model.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${model.apiKey}` },
-        body: JSON.stringify({ model: model.model, messages: [{ role: 'user', content: prompt }], max_tokens: 50 }),
-        signal: abort.signal,
-      })
-      const data = await res.json()
-      const aiAnswer = data.choices?.[0]?.message?.content?.trim() ?? ''
+      const aiAnswer = await callAI(
+        { baseUrl: model.baseUrl, model: model.model, apiKey: model.apiKey },
+        prompt,
+        { maxTokens: 50, signal: abort.signal },
+      )
       if (!aiAnswer) throw new Error('AI returned empty answer')
       setModelOk(true)
 

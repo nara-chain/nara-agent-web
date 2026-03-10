@@ -4,6 +4,7 @@ import bs58 from 'bs58'
 import { useApp, genAgentId } from '../store.jsx'
 import { useI18n, LANG_OPTIONS } from '../i18n.jsx'
 import { registerAgent, checkAgentRegistered, getAgentPoints, getRegistryConfig } from '../quest.js'
+import { callAI } from '../ai.js'
 import './Settings.css'
 
 function Toast({ msg, type, onClose }) {
@@ -61,23 +62,21 @@ export default function Settings() {
     setDirty(false); notify(t('settings.saved'))
   }, [form, model, updateModel, notify, t])
 
+  const [detectLog, setDetectLog] = useState([])
+
   const handleTest = useCallback(async () => {
     if (!form.baseUrl || !form.modelName || !form.apiKey) { notify(t('settings.fillFirst'), 'err'); return }
     updateModel({ ...model, baseUrl: form.baseUrl, model: form.modelName, apiKey: form.apiKey })
-    setDirty(false); setTesting(true); setTestResult(null)
+    setDirty(false); setTesting(true); setTestResult(null); setDetectLog([])
     const start = Date.now()
     try {
-      const url = `${form.baseUrl.replace(/\/$/, '')}/chat/completions`
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${form.apiKey}` },
-        body: JSON.stringify({ model: form.modelName, messages: [{ role: 'user', content: 'Reply with exactly: OK' }], max_tokens: 10 }),
-      })
+      const reply = await callAI(
+        { baseUrl: form.baseUrl, model: form.modelName, apiKey: form.apiKey },
+        'Reply with exactly: OK',
+        { maxTokens: 10, onLog: msg => setDetectLog(prev => [...prev, msg]) },
+      )
       const latency = Date.now() - start
-      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error?.message || `HTTP ${res.status}`) }
-      const data = await res.json()
-      const reply = data.choices?.[0]?.message?.content ?? ''
-      setTestResult({ ok: true, msg: `"${reply.trim()}"`, latency }); setModelOk(true)
+      setTestResult({ ok: true, msg: `"${reply}"`, latency }); setModelOk(true)
       notify(t('settings.connSuccess'))
     } catch (e) {
       setTestResult({ ok: false, msg: e.message || t('settings.connFailed') }); setModelOk(false)
@@ -273,6 +272,12 @@ export default function Settings() {
             </div>
           </div>
         </div>
+
+        {detectLog.length > 0 && (
+          <div className="settings-detect-log" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', margin: '0.5rem 0', lineHeight: 1.6 }}>
+            {detectLog.map((line, i) => <div key={i}>{line}</div>)}
+          </div>
+        )}
 
         {testResult && (
           <div className={`settings-test-result ${testResult.ok ? 'test-ok' : 'test-err'}`}>
