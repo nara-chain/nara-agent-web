@@ -14,38 +14,32 @@ export function getApiType(baseUrl) {
   return apiTypeCache[baseUrl?.replace(/\/$/, '')] ?? null
 }
 
-/** Wrap fetch to capture raw error response body (SDK sometimes reports "no body") */
-function createFetchWithErrorCapture() {
-  return async (url, init) => {
-    const res = await fetch(url, init)
-    if (!res.ok) {
-      const body = await res.text()
-      const err = new Error(`${res.status} ${body || res.statusText}`)
-      err.status = res.status
-      err.error = tryParseJSON(body)
-      err.rawBody = body
-      throw err
-    }
-    return res
-  }
-}
-
-function tryParseJSON(s) { try { return JSON.parse(s) } catch { return null } }
-
-function logError(log, endpoint, e) {
-  log(`✗ ${endpoint} failed: ${e.status ?? ''} ${e.rawBody ?? e.message}`)
-}
-
 function getClient(baseUrl, apiKey) {
   const base = baseUrl.replace(/\/$/, '')
   const key = `${base}::${apiKey}`
   if (!clientCache[key]) {
-    clientCache[key] = new OpenAI({
-      baseURL: base, apiKey, dangerouslyAllowBrowser: true,
-      fetch: createFetchWithErrorCapture(),
-    })
+    clientCache[key] = new OpenAI({ baseURL: base, apiKey, dangerouslyAllowBrowser: true })
   }
   return clientCache[key]
+}
+
+/**
+ * Raw fetch probe — used for auto-detect to get full error details.
+ * Returns { ok, status, body } without SDK error wrapping.
+ */
+async function rawProbe(baseUrl, apiKey, path, payload, signal) {
+  const url = `${baseUrl}${path}`
+  try {
+    const res = await fetch(url, {
+      method: 'POST', signal,
+      headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify(payload),
+    })
+    const body = await res.text()
+    return { ok: res.ok, status: res.status, body }
+  } catch (e) {
+    return { ok: false, status: 0, body: e.message }
+  }
 }
 
 /**
@@ -72,34 +66,36 @@ export async function callAI(cfg, prompt, opts = {}) {
     return callCompletions(client, cfg.model, prompt, opts)
   }
 
-  // Auto-detect: try completions first, fall back to responses
+  // Auto-detect using raw fetch to get full error details
   log(`Detecting API format...`)
 
-  let completionsErr
+  const completionsPayload = { model: cfg.model, messages: [{ role: 'user', content: prompt }], max_tokens: opts.maxTokens ?? 50 }
+  const responsesPayload = { model: cfg.model, input: [{ role: 'user', content: prompt }], max_output_tokens: opts.maxTokens ?? 50 }
+
   log(`Trying /chat/completions ...`)
-  try {
-    const result = await callCompletions(client, cfg.model, prompt, opts)
+  const r1 = await rawProbe(base, cfg.apiKey, '/chat/completions', completionsPayload, opts.signal)
+  if (r1.ok) {
     apiTypeCache[base] = 'completions'
     log(`✓ Using /chat/completions`)
-    return result
-  } catch (e) {
-    if (e.name === 'AbortError') throw e
-    completionsErr = e
-    logError(log, '/chat/completions', e)
+    const data = JSON.parse(r1.body)
+    return data.choices?.[0]?.message?.content?.trim() ?? ''
   }
+  log(`✗ /chat/completions failed: ${r1.status} ${r1.body}`)
 
   log(`Trying /responses ...`)
-  try {
-    const result = await callResponses(client, cfg.model, prompt, opts)
+  const r2 = await rawProbe(base, cfg.apiKey, '/responses', responsesPayload, opts.signal)
+  if (r2.ok) {
     apiTypeCache[base] = 'responses'
     log(`✓ Using /responses`)
-    return result
-  } catch (e) {
-    if (e.name === 'AbortError') throw e
-    logError(log, '/responses', e)
-    // Both failed — throw the more informative error
-    throw completionsErr.status ? completionsErr : e
+    const data = JSON.parse(r2.body)
+    return data.output_text?.trim() ?? data.output?.[0]?.content?.[0]?.text?.trim() ?? ''
   }
+  log(`✗ /responses failed: ${r2.status} ${r2.body}`)
+
+  // Both failed — throw with the most informative error
+  const err = new Error(`API detection failed. /chat/completions: ${r1.status} ${r1.body}`)
+  err.status = r1.status || r2.status
+  throw err
 }
 
 async function callCompletions(client, model, prompt, opts = {}) {
