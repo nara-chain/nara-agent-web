@@ -13,5 +13,5 @@ export const DEFAULT_TESTNET_RELAY = 'https://devnet-quest-api.nara.build'
 export const MODEL_HUB_BASE = 'https://model-api.nara.build'
 
 // Address Lookup Table (ALT) — reduces tx size for multi-instruction transactions
-export const DEFAULT_ALT_ADDRESS         = ''  // TODO: set mainnet ALT address
-export const DEFAULT_TESTNET_ALT_ADDRESS = 'GP5Uq8q6fRyE2oAGG4VVqrEgReL8kk3vAgsnjrhXefab'
+export const DEFAULT_ALT_ADDRESS         = null
+export const DEFAULT_TESTNET_ALT_ADDRESS = null
