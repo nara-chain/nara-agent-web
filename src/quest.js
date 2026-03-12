@@ -16,7 +16,7 @@ import {
 import { setAltAddress } from 'nara-sdk/src/tx'
 import { IS_TESTNET, DEFAULT_ALT_ADDRESS, DEFAULT_TESTNET_ALT_ADDRESS } from './constants.js'
 
-// Set ALT address for reduced tx size (supports stake + submit + activityLog in one tx)
+// Override ALT address only if explicitly set; otherwise SDK uses its built-in default
 const altAddr = IS_TESTNET ? DEFAULT_TESTNET_ALT_ADDRESS : DEFAULT_ALT_ADDRESS
 if (altAddr) setAltAddress(altAddr)
 import {

@@ -3,7 +3,7 @@ import { Keypair, Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PE
 import * as bip39 from 'bip39'
 import { derivePath } from 'ed25519-hd-key'
 import bs58 from 'bs58'
-import nacl from 'tweetnacl'
+import { signUrl } from 'nara-sdk/src/sign'
 import { useApp } from '../store.jsx'
 import { MODEL_HUB_BASE } from '../constants.js'
 import { useI18n } from '../i18n.jsx'
@@ -232,27 +232,19 @@ export default function Wallet() {
     }
   }, [])
 
-  const signMessage = useCallback((kp, message) => {
-    const msgBytes = new TextEncoder().encode(message)
-    const sig = nacl.sign.detached(msgBytes, kp.secretKey)
-    return bs58.encode(sig)
-  }, [])
-
   const fetchHubInfo = useCallback(async () => {
     if (!wallet || !hubConfig) return
     setHubInfo('loading')
     try {
       const kp = storeToKeypair(wallet)
-      const ts = Math.floor(Date.now() / 1000)
-      const sign = signMessage(kp, `info:${ts}`)
       const infoPath = hubConfig.endpoints.info.path
-      const url = `${MODEL_HUB_BASE}${infoPath}?address=${kp.publicKey.toBase58()}&ts=${ts}&sign=${sign}`
+      const url = signUrl(`${MODEL_HUB_BASE}${infoPath}`, kp)
       const res = await fetch(url)
       if (!res.ok) { setHubInfo('none'); return }
       const json = await res.json()
       setHubInfo(json.data)
     } catch { setHubInfo('none') }
-  }, [wallet, hubConfig, signMessage])
+  }, [wallet, hubConfig])
 
   useEffect(() => {
     if (showTransfer && transferTab === 'compute') {
@@ -301,10 +293,8 @@ export default function Wallet() {
       }
 
       // 3. Sign and call charge endpoint
-      const ts = Math.floor(Date.now() / 1000)
-      const sign = signMessage(kp, `${sig}:${ts}`)
       const chargePath = hubConfig.endpoints.charge.path
-      const chargeUrl = `${MODEL_HUB_BASE}${chargePath}?address=${kp.publicKey.toBase58()}&tx=${sig}&ts=${ts}&sign=${sign}`
+      const chargeUrl = signUrl(`${MODEL_HUB_BASE}${chargePath}`, kp, { tx: sig })
       const chargeRes = await fetch(chargeUrl)
       const chargeJson = await chargeRes.json()
 
@@ -319,7 +309,7 @@ export default function Wallet() {
     } catch (e) {
       setBuyResult({ ok: false, error: e.message || t('wallet.buyFailed') })
     } finally { setBuying(false) }
-  }, [buyAmount, hubConfig, wallet, rpcUrl, fetchBalance, fetchHubInfo, signMessage, t])
+  }, [buyAmount, hubConfig, wallet, rpcUrl, fetchBalance, fetchHubInfo, t])
 
   const handleSendClick = useCallback(() => {
     if (!toAddr || !amount) { notify(t('wallet.fillFields'), 'err'); return }
